@@ -108,6 +108,33 @@ interface PoolCreation {
   openingTxid?: string
 }
 
+type Page = 'swap' | 'pools' | 'pool' | 'create' | 'activity'
+
+function routeFromLocation(): { page: Page; poolId?: string } {
+  const parts = window.location.pathname.split('/').filter(Boolean)
+  if (parts[0] === 'pools' && parts[1]) return { page: 'pool', poolId: decodeURIComponent(parts[1]) }
+  if (parts[0] === 'pools') return { page: 'pools' }
+  if (parts[0] === 'create') return { page: 'create' }
+  if (parts[0] === 'activity') return { page: 'activity' }
+  return { page: 'swap' }
+}
+
+function pathForPage(page: Page, poolId?: string): string {
+  if (page === 'pools') return '/pools'
+  if (page === 'pool' && poolId) return `/pools/${encodeURIComponent(poolId)}`
+  if (page === 'create') return '/create'
+  if (page === 'activity') return poolId ? `/activity?pool=${encodeURIComponent(poolId)}` : '/activity'
+  return '/'
+}
+
+function poolSlug(firstTicker: string, secondTicker: string): string {
+  return [firstTicker, secondTicker]
+    .map((ticker) => ticker.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''))
+    .sort()
+    .join('-')
+    .slice(0, 64)
+}
+
 interface ArkadeProvider {
   isArkade: true
   connect(): Promise<string[]>
@@ -197,13 +224,16 @@ function TokenMark({ label, warm = false }: { label: string; warm?: boolean }) {
 function Spinner() { return <span className="spinner" aria-hidden="true" /> }
 
 function App() {
-  const [page, setPage] = useState<'swap' | 'pools' | 'pool' | 'create' | 'activity'>('swap')
-  const [mode, setMode] = useState<'swap' | 'deposit' | 'withdraw'>('swap')
+  const initialRoute = routeFromLocation()
+  const initialParams = new URLSearchParams(window.location.search)
+  const [page, setPage] = useState<Page>(initialRoute.page)
+  const initialSwapMode = initialRoute.page === 'swap' && ['deposit', 'withdraw'].includes(initialParams.get('mode') ?? '') ? initialParams.get('mode') as 'deposit' | 'withdraw' : 'swap'
+  const [mode, setMode] = useState<'swap' | 'deposit' | 'withdraw'>(initialSwapMode)
   const [pools, setPools] = useState<Pool[]>([])
   const [poolResults, setPoolResults] = useState<Pool[]>([])
   const [poolResultTotal, setPoolResultTotal] = useState(0)
   const [poolCursor, setPoolCursor] = useState<string | undefined>()
-  const [poolId, setPoolId] = useState('')
+  const [poolId, setPoolId] = useState(initialRoute.poolId ?? (initialRoute.page === 'activity' ? initialParams.get('pool') ?? '' : ''))
   const [address, setAddress] = useState('')
   const [assets, setAssets] = useState<AssetInfo[]>([])
   const [btcBalance, setBtcBalance] = useState(0)
@@ -215,7 +245,7 @@ function App() {
   const [showPairModal, setShowPairModal] = useState(false)
   const [modalSellAssetId, setModalSellAssetId] = useState('')
   const [modalBuyAssetId, setModalBuyAssetId] = useState('')
-  const [poolSearch, setPoolSearch] = useState('')
+  const [poolSearch, setPoolSearch] = useState(initialRoute.page === 'pools' ? initialParams.get('q') ?? '' : '')
   const [tokenSearch, setTokenSearch] = useState('')
   const [catalogAssets, setCatalogAssets] = useState<CatalogAsset[]>([])
   const [linkCopied, setLinkCopied] = useState(false)
@@ -228,7 +258,7 @@ function App() {
   const [liquidityRequest, setLiquidityRequest] = useState<LiquidityRequest | null>(null)
   const [activity, setActivity] = useState<ActivityEvent[]>([])
   const [activityCursor, setActivityCursor] = useState<string | undefined>()
-  const [createMode, setCreateMode] = useState<'asset' | 'pool'>('asset')
+  const [createMode, setCreateMode] = useState<'asset' | 'pool'>(initialRoute.page === 'create' && initialParams.get('mode') === 'pool' ? 'pool' : 'asset')
   const [assetForm, setAssetForm] = useState({ name: '', ticker: '', supply: '', decimals: '0', icon: '' })
   const [issuedAsset, setIssuedAsset] = useState<IssueAssetResult | null>(null)
   const [poolForm, setPoolForm] = useState({ id: '', name: '', baseAssetId: 'btc', quoteAssetId: '', baseAmount: '', quoteAmount: '', feeBps: '100', protocolFeeBps: '30' })
@@ -286,6 +316,14 @@ function App() {
     return { ticker, decimals, name: assetId === 'btc' ? 'Native Bitcoin' : walletAsset?.metadata?.name ?? catalogAsset?.metadata?.name ?? poolInfo?.metadata?.name ?? short(assetId, 10), controlled: walletAsset?.controlAssetId ?? catalogAsset?.controlAssetId ?? poolInfo?.controlAssetId }
   }
 
+  function updatePoolPair(baseAssetId: string, quoteAssetId: string) {
+    const baseTicker = baseAssetId ? tokenDetails(baseAssetId).ticker : ''
+    const quoteTicker = quoteAssetId ? tokenDetails(quoteAssetId).ticker : ''
+    const name = baseTicker && quoteTicker ? `${baseTicker} / ${quoteTicker}` : ''
+    const id = baseTicker && quoteTicker ? poolSlug(baseTicker, quoteTicker) : ''
+    setPoolForm((current) => ({ ...current, baseAssetId, quoteAssetId, id, name }))
+  }
+
   const creationBaseDetails = poolForm.baseAssetId ? tokenDetails(poolForm.baseAssetId) : undefined
   const creationQuoteDetails = poolForm.quoteAssetId ? tokenDetails(poolForm.quoteAssetId) : undefined
   const creationBaseAmount = creationBaseDetails ? rawAmount(poolForm.baseAmount, creationBaseDetails.decimals) : null
@@ -316,7 +354,7 @@ function App() {
   }
   const filteredTokenIds = tokenIds.filter(matchesTokenSearch)
   const filteredModalBuyOptions = modalBuyOptions.filter(matchesTokenSearch)
-  const filteredPools = poolResults
+  const filteredPools = [...poolResults].sort((a, b) => Number(Boolean(b.onFire)) - Number(Boolean(a.onFire)))
 
   function bestPoolForPair(first: string, second: string): Pool | undefined {
     return pools.filter((item) => item.available && [item.baseAssetId, item.quoteAssetId].includes(first) && [item.baseAssetId, item.quoteAssetId].includes(second))
@@ -329,6 +367,7 @@ function App() {
 
   function swapUrl(targetPool: Pool, targetSellAssetId: string, includeAmount = false): string {
     const url = new URL(window.location.href)
+    url.pathname = '/'
     url.search = ''
     url.hash = ''
     url.searchParams.set('swap', targetPool.id)
@@ -341,6 +380,44 @@ function App() {
   function replaceSwapUrl(targetPool: Pool, targetSellAssetId: string) {
     window.history.replaceState(null, '', swapUrl(targetPool, targetSellAssetId))
     setLinkCopied(false)
+  }
+
+  function navigate(nextPage: Page, nextPoolId?: string) {
+    const targetPoolId = nextPoolId ?? (nextPage === 'activity' ? poolId : undefined)
+    const url = new URL(pathForPage(nextPage, targetPoolId), window.location.origin)
+    if (nextPage === 'swap' && poolId) {
+      url.searchParams.set('swap', poolId)
+      if (pool?.quoteAssetId === sellAssetId) url.searchParams.set('side', 'quote')
+      if (mode !== 'swap') url.searchParams.set('mode', mode)
+    }
+    if (nextPage === 'pools' && poolSearch.trim()) url.searchParams.set('q', poolSearch.trim())
+    if (nextPage === 'create' && createMode === 'pool') url.searchParams.set('mode', 'pool')
+    window.history.pushState(null, '', `${url.pathname}${url.search}`)
+    setPage(nextPage)
+    if (targetPoolId) setPoolId(targetPoolId)
+    setError('')
+  }
+
+  function updatePoolSearch(value: string) {
+    setPoolSearch(value)
+    const url = new URL('/pools', window.location.origin)
+    if (value.trim()) url.searchParams.set('q', value.trim())
+    window.history.replaceState(null, '', `${url.pathname}${url.search}`)
+  }
+
+  function updateCreateMode(nextMode: 'asset' | 'pool') {
+    setCreateMode(nextMode); setError(''); setCreationStep('')
+    window.history.replaceState(null, '', nextMode === 'pool' ? '/create?mode=pool' : '/create')
+  }
+
+  function updateSwapMode(nextMode: 'swap' | 'deposit' | 'withdraw') {
+    setMode(nextMode); setError(''); setLiquidityAmount(''); setLiquidityRequest(null)
+    const url = new URL(window.location.href)
+    url.pathname = '/'
+    if (poolId) url.searchParams.set('swap', poolId)
+    if (nextMode === 'swap') url.searchParams.delete('mode')
+    else url.searchParams.set('mode', nextMode)
+    window.history.replaceState(null, '', `${url.pathname}${url.search}`)
   }
 
   async function copySwapLink() {
@@ -391,19 +468,19 @@ function App() {
     const [nextAssets, nextBalance] = await Promise.all([window.arkade.getAssets(), window.arkade.getBalance()])
     assertProviderAmounts(nextAssets, nextBalance)
     setAssets(nextAssets); setBtcBalance(nextBalance.available)
-  }, [address])
+  }, [address, setAssets, setBtcBalance])
 
   const refreshPools = useCallback(async () => {
     const page = await api<PageResult<Pool>>('/v1/pools?limit=100')
     setPools(page.items)
     return page.items
-  }, [])
+  }, [setPools])
 
   const refreshActivity = useCallback(async () => {
     if (!poolId) return
     const result = await api<CursorPage<ActivityEvent>>(`/v1/pools/${encodeURIComponent(poolId)}/activity?limit=25`)
     setActivity(result.items); setActivityCursor(result.nextCursor)
-  }, [poolId])
+  }, [poolId, setActivity, setActivityCursor])
 
   async function loadMoreActivity() {
     if (!poolId || !activityCursor) return
@@ -412,7 +489,24 @@ function App() {
   }
 
   const openPoolDetail = useCallback((target: Pool) => {
+    window.history.pushState(null, '', pathForPage('pool', target.id))
     setPoolId(target.id); setPage('pool'); setError('')
+  }, [setPoolId, setPage, setError])
+
+  useEffect(() => {
+    const onPopState = () => {
+      const route = routeFromLocation()
+      const params = new URLSearchParams(window.location.search)
+      setPage(route.page)
+      const nextPoolId = route.poolId ?? (route.page === 'activity' ? params.get('pool') ?? '' : '')
+      if (nextPoolId) setPoolId(nextPoolId)
+      if (route.page === 'pools') setPoolSearch(params.get('q') ?? '')
+      if (route.page === 'create') setCreateMode(params.get('mode') === 'pool' ? 'pool' : 'asset')
+      if (route.page === 'swap') setMode(['deposit', 'withdraw'].includes(params.get('mode') ?? '') ? params.get('mode') as 'deposit' | 'withdraw' : 'swap')
+      setError('')
+    }
+    window.addEventListener('popstate', onPopState)
+    return () => window.removeEventListener('popstate', onPopState)
   }, [])
 
   useEffect(() => {
@@ -421,9 +515,12 @@ function App() {
       if (!/^[1-9]\d*$/.test(info.poolCreationFeeSats)) throw new Error('The API returned an invalid pool creation fee.')
       setDeployment(info)
       setPools(page.items)
+      const route = routeFromLocation()
       const params = new URLSearchParams(window.location.search)
       const linked = params.get('swap') ? page.items.find((item) => item.id === params.get('swap') && item.available) : undefined
-      const first = linked ?? page.items.find((p) => p.available && p.protocolFeeBps > 0) ?? page.items.find((p) => p.available) ?? page.items[0]
+      const requestedPoolId = route.poolId ?? (route.page === 'activity' ? params.get('pool') ?? undefined : undefined)
+      const routed = requestedPoolId ? page.items.find((item) => item.id === requestedPoolId) : undefined
+      const first = linked ?? routed ?? (!requestedPoolId ? page.items.find((p) => p.available && p.protocolFeeBps > 0) ?? page.items.find((p) => p.available) ?? page.items[0] : undefined)
       if (first) {
         setPoolId(first.id)
         setSellAssetId(linked && params.get('side') === 'quote' ? first.quoteAssetId : first.baseAssetId)
@@ -437,7 +534,7 @@ function App() {
     if (page !== 'pools') return
     const controller = new AbortController()
     const timer = window.setTimeout(() => {
-      const query = new URLSearchParams({ limit: '20' })
+      const query = new URLSearchParams({ limit: '100' })
       if (poolSearch.trim()) query.set('q', poolSearch.trim())
       api<PageResult<Pool>>(`/v1/pools?${query}`, { signal: controller.signal }).then((result) => {
         setPoolResults(result.items); setPoolResultTotal(result.total); setPoolCursor(result.nextCursor)
@@ -579,7 +676,12 @@ function App() {
     setBusy(true); setError(''); setPoolCreation(null)
     try {
       await assertWalletNetwork(window.arkade)
-      const stem = poolForm.id.toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 9) || 'POOL'
+      setCreationStep('Checking pair availability')
+      const candidates = await api<PageResult<Pool>>(`/v1/pools?assetId=${encodeURIComponent(poolForm.baseAssetId)}&limit=100`)
+      const duplicate = candidates.items.find((candidate) => [candidate.baseAssetId, candidate.quoteAssetId].includes(poolForm.baseAssetId)
+        && [candidate.baseAssetId, candidate.quoteAssetId].includes(poolForm.quoteAssetId))
+      if (duplicate) throw new Error(`A pool already exists for this pair (${duplicate.name}).`)
+      const stem = poolForm.name.toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 9) || 'POOL'
       setCreationStep('1/5 · Issue the pool control asset')
       const control = await window.arkade.issueAsset({ amount: 1, metadata: { ticker: `${stem}-CTRL`.slice(0, 16), decimals: 0 } })
       setCreationStep('2/5 · Issue LP tokens')
@@ -677,8 +779,8 @@ function App() {
   return (
     <div className="app-shell">
       <header>
-        <button className="brand" onClick={() => setPage('swap')} aria-label="Inscrib3 app home"><img src="/logo.svg" alt="" /><span>INSCRIB3</span><small>APP</small></button>
-        <nav>{(['swap', 'pools', 'create', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') ? 'active' : ''} onClick={() => { setPage(item); setError(''); if (item === 'pools') void refreshPools(); if (item === 'activity') void refreshActivity() }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}</nav>
+        <button className="brand" onClick={() => navigate('swap')} aria-label="Inscrib3 app home"><img src="/logo.svg" alt="" /><span>INSCRIB3</span><small>APP</small></button>
+        <nav>{(['swap', 'pools', 'create', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') void refreshPools(); if (item === 'activity') void refreshActivity() }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}</nav>
         <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span><button className="wallet-small" onClick={() => void connect()} disabled={busy}>{address ? short(address, 4) : 'Connect wallet'}</button></div>
       </header>
 
@@ -693,7 +795,7 @@ function App() {
         <section className="workspace" id="swap">
           <div className="swap-card">
             <div className="card-head"><div><h2>{mode === 'swap' ? 'Swap assets' : mode === 'deposit' ? 'Add liquidity' : 'Remove liquidity'}</h2><span>Covenant-enforced constant-product pool</span></div>{mode === 'swap' && <button className="icon-button" onClick={() => setShowSettings(!showSettings)} aria-label="Swap settings">⚙</button>}</div>
-            <div className="mode-tabs">{(['swap', 'deposit', 'withdraw'] as const).map((item) => <button key={item} className={mode === item ? 'active' : ''} onClick={() => { setMode(item); setError(''); setLiquidityAmount(''); setLiquidityRequest(null) }}>{item === 'swap' ? 'Swap' : item === 'deposit' ? 'Add' : 'Remove'}</button>)}</div>
+            <div className="mode-tabs">{(['swap', 'deposit', 'withdraw'] as const).map((item) => <button key={item} className={mode === item ? 'active' : ''} onClick={() => updateSwapMode(item)}>{item === 'swap' ? 'Swap' : item === 'deposit' ? 'Add' : 'Remove'}</button>)}</div>
             {mode === 'swap' && <>
               {showSettings && <div className="settings"><span>Max slippage</span><div>{[10, 50, 100].map((v) => <button className={slippage === v ? 'selected' : ''} key={v} onClick={() => setSlippage(v)}>{v / 100}%</button>)}</div></div>}
               <div className="asset-box">
@@ -765,7 +867,7 @@ function App() {
         </> : page === 'pools' ? <section className="view-page">
           <div className="view-heading"><div><span className="eyebrow"><i /> LIVE LIQUIDITY</span><h1>Pools</h1><p>Current covenant reserves and AMM identifiers.</p></div><button className="secondary" onClick={() => void refreshPools()}>Refresh</button></div>
           <div className="pool-search-row">
-            <label className="search-field"><span aria-hidden="true">⌕</span><input type="search" value={poolSearch} onChange={(event) => setPoolSearch(event.target.value)} placeholder="Search by pool, ticker or asset ID" aria-label="Search pools" />{poolSearch && <button type="button" onClick={() => setPoolSearch('')} aria-label="Clear pool search">×</button>}</label>
+            <label className="search-field"><span aria-hidden="true">⌕</span><input type="search" value={poolSearch} onChange={(event) => updatePoolSearch(event.target.value)} placeholder="Search by pool, ticker or asset ID" aria-label="Search pools" />{poolSearch && <button type="button" onClick={() => updatePoolSearch('')} aria-label="Clear pool search">×</button>}</label>
             <span>{filteredPools.length} of {poolResultTotal} pools</span>
           </div>
           {filteredPools.length === 0 ? <div className="empty-state search-empty">No pools match “{poolSearch.trim()}”.</div> : <div className="pool-grid">{filteredPools.map((item) => {
@@ -795,7 +897,7 @@ function App() {
             const basePerQuote = ratio(baseReserve * 10n ** BigInt(quoteToken.decimals), quoteReserve * 10n ** BigInt(base.decimals))
             return <>
               <div className="pool-detail-hero">
-                <button className="back-link" onClick={() => setPage('pools')}>← All pools</button>
+                <button className="back-link" onClick={() => navigate('pools')}>← All pools</button>
                 <div className="pool-detail-title"><div className="marks"><TokenMark label={base.ticker} /><TokenMark label={quoteToken.ticker} warm /></div><div><span className="eyebrow"><i /> POOL DETAIL</span><h1>{pool.name}</h1><p><span className={pool.available ? 'live-dot' : 'offline-dot'} /> {pool.available ? 'Pool active' : 'Pool unavailable'} · {pool.feeBps} bps total fee</p></div></div>
                 <button className="primary compact" onClick={() => { replaceSwapUrl(pool, pool.baseAssetId); setSellAssetId(pool.baseAssetId); setAmount(''); setReceiveAmount(''); setQuote(null); setPage('swap') }}>Trade this pool</button>
               </div>
@@ -829,7 +931,7 @@ function App() {
           })()}
         </section> : page === 'create' ? <section className="view-page create-page">
           <div className="view-heading"><div><span className="eyebrow"><i /> PERMISSIONLESS ASSETS</span><h1>Create</h1><p>Issue an Arkade asset or open a covenant-enforced liquidity pool from your own wallet.</p></div></div>
-          <div className="create-tabs"><button className={createMode === 'asset' ? 'active' : ''} onClick={() => { setCreateMode('asset'); setError(''); setCreationStep('') }}>Create asset</button><button className={createMode === 'pool' ? 'active' : ''} onClick={() => { setCreateMode('pool'); setError(''); setCreationStep('') }}>Create pool</button></div>
+          <div className="create-tabs"><button className={createMode === 'asset' ? 'active' : ''} onClick={() => updateCreateMode('asset')}>Create asset</button><button className={createMode === 'pool' ? 'active' : ''} onClick={() => updateCreateMode('pool')}>Create pool</button></div>
           {createMode === 'asset' ? <div className="create-layout">
             <article className="create-card">
               <div className="card-head"><div><h2>Issue a new asset</h2><span>Non-custodial issuance through Inscrib3 Wallet</span></div></div>
@@ -849,17 +951,18 @@ function App() {
             <article className="create-card pool-create-card">
               <div className="card-head"><div><h2>Open a liquidity pool</h2><span>Default fee: 0.70% LP + 0.30% protocol</span></div></div>
               <div className="form-grid">
-                <label><span>Pool slug</span><input value={poolForm.id} onChange={(e) => setPoolForm({ ...poolForm, id: e.target.value.toLowerCase() })} placeholder="btc-myasset" /></label>
-                <label><span>Display name</span><input value={poolForm.name} onChange={(e) => setPoolForm({ ...poolForm, name: e.target.value })} placeholder="BTC / MYASSET" /></label>
-                <label><span>Base asset</span><select value={poolForm.baseAssetId} onChange={(e) => setPoolForm({ ...poolForm, baseAssetId: e.target.value })}><option value="btc">BTC · native</option>{assets.map((item) => <option key={item.assetId} value={item.assetId}>{item.metadata?.ticker ?? short(item.assetId)}</option>)}</select></label>
-                <label><span>Quote asset</span><select value={poolForm.quoteAssetId} onChange={(e) => setPoolForm({ ...poolForm, quoteAssetId: e.target.value })}><option value="">Select asset</option>{assets.filter((item) => item.assetId !== poolForm.baseAssetId).map((item) => <option key={item.assetId} value={item.assetId}>{item.metadata?.ticker ?? short(item.assetId)}</option>)}</select></label>
-                <label><span>Initial base reserve</span><input value={poolForm.baseAmount} onChange={(e) => setPoolForm({ ...poolForm, baseAmount: e.target.value })} placeholder="0" inputMode="decimal" /></label>
-                <label><span>Initial quote reserve</span><input value={poolForm.quoteAmount} onChange={(e) => setPoolForm({ ...poolForm, quoteAmount: e.target.value })} placeholder="0" inputMode="decimal" /></label>
+                <label><span>Pool slug <small>derived from tickers</small></span><input value={poolForm.id} placeholder="Select both assets" readOnly /></label>
+                <label><span>Display name <small>derived from the pair</small></span><input value={poolForm.name} placeholder="Select both assets" readOnly /></label>
+                <label><span>Base asset</span><select value={poolForm.baseAssetId} onChange={(e) => updatePoolPair(e.target.value, poolForm.quoteAssetId)}><option value="btc">BTC · native</option>{assets.map((item) => <option key={item.assetId} value={item.assetId}>{item.metadata?.ticker ?? short(item.assetId)}</option>)}</select></label>
+                <label><span>Quote asset</span><select value={poolForm.quoteAssetId} onChange={(e) => updatePoolPair(poolForm.baseAssetId, e.target.value)}><option value="">Select asset</option>{assets.filter((item) => item.assetId !== poolForm.baseAssetId).map((item) => <option key={item.assetId} value={item.assetId}>{item.metadata?.ticker ?? short(item.assetId)}</option>)}</select></label>
+                <label><span>Initial base reserve <small>{creationBaseDetails ? `${creationBaseDetails.ticker} display units · ${creationBaseDetails.decimals} decimals` : 'select an asset'}</small></span><input value={poolForm.baseAmount} onChange={(e) => setPoolForm({ ...poolForm, baseAmount: e.target.value })} placeholder={poolForm.baseAssetId === 'btc' ? '0.002' : '100'} inputMode="decimal" /></label>
+                <label><span>Initial quote reserve <small>{creationQuoteDetails ? `${creationQuoteDetails.ticker} display units · ${creationQuoteDetails.decimals} decimals` : 'select an asset'}</small></span><input value={poolForm.quoteAmount} onChange={(e) => setPoolForm({ ...poolForm, quoteAmount: e.target.value })} placeholder="100" inputMode="decimal" /></label>
                 <label><span>Total fee · bps</span><input value={poolForm.feeBps} onChange={(e) => setPoolForm({ ...poolForm, feeBps: e.target.value })} inputMode="numeric" min="31" /></label>
                 <label><span>Protocol fee · min 30 bps</span><input value={poolForm.protocolFeeBps} onChange={(e) => setPoolForm({ ...poolForm, protocolFeeBps: e.target.value })} inputMode="numeric" min="30" /></label>
               </div>
               <div className="fee-summary">
                 <div><span>Initial liquidity</span><b title={initialLiquiditySummary}>{initialLiquiditySummary}</b></div>
+                <div><span>Raw amounts sent to API</span><b title={creationBaseAmount && creationQuoteAmount ? `${creationBaseAmount} / ${creationQuoteAmount}` : undefined}>{creationBaseAmount && creationQuoteAmount ? `${comma(creationBaseAmount)} / ${comma(creationQuoteAmount)}` : 'Converted automatically'}</b></div>
                 <div><span>Creation fee · included</span><b>{deployment ? `${comma(deployment.poolCreationFeeSats)} sats` : 'Unavailable'}</b></div>
                 <div><span>Technical carriers</span><b>{bootstrapSummary ? `${comma(bootstrapSummary.carrierSats)} sats` : 'Calculated by API'}</b></div>
                 <div><span>Total bootstrap funding</span><b title={bootstrapSummary?.total}>{bootstrapSummary?.total ?? 'Returned before payment'}</b></div>
@@ -911,7 +1014,7 @@ function App() {
         </section>
       </div>}
 
-      <footer><button className="footer-brand" onClick={() => setPage('swap')}><img src="/logo.svg" alt="" /> INSCRIB3 / APP</button><span><i /> {NETWORK_LABEL} / experimental software</span><a href="https://docs.arkadeos.com/vaults/reference/automated-market-maker" target="_blank" rel="noreferrer">How the contracts work ↗</a></footer>
+      <footer><button className="footer-brand" onClick={() => navigate('swap')}><img src="/logo.svg" alt="" /> INSCRIB3 / APP</button><span><i /> {NETWORK_LABEL} / experimental software</span><a href="https://docs.arkadeos.com/vaults/reference/automated-market-maker" target="_blank" rel="noreferrer">How the contracts work ↗</a></footer>
     </div>
   )
 }

@@ -30,6 +30,7 @@ jobs:
           test -n "$VITE_NETWORK" || (echo "Set the VITE_NETWORK repository variable" && exit 1)
           test -n "$VITE_APP_URL" || (echo "Set the VITE_APP_URL repository variable" && exit 1)
           npm run build
+          cp dist/index.html dist/404.html
         env:
           VITE_API_URL: ${{ vars.VITE_API_URL }}
           VITE_NETWORK: ${{ vars.VITE_NETWORK }}

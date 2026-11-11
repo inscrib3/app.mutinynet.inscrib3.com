@@ -225,6 +225,7 @@ aside { display: flex; flex-direction: column; gap: 16px; }
 .form-grid label small { color: var(--dim); }
 .form-grid input, .form-grid select { width: 100%; min-height: 47px; padding: 0 13px; border: 1px solid var(--line); border-radius: 10px; outline: 0; color: var(--text); background: rgba(7,9,8,.78); font: 12px var(--mono); }
 .form-grid input:focus, .form-grid select:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(52,211,153,.07); }
+.form-grid input[readonly] { color: var(--muted); background: rgba(255,255,255,.025); cursor: default; }
 .form-grid option { background: #0d0f0f; }
 .fee-summary { margin: -3px 0 18px; padding: 13px 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 18px; border: 1px solid var(--line); border-radius: 11px; background: rgba(255,255,255,.018); }
 .fee-summary div { min-width: 0; display: flex; flex-direction: column; gap: 6px; }.fee-summary span { color: var(--dim); font-size: 10px; }.fee-summary b, .fee-summary code { overflow: hidden; color: #cbd1ce; font: 500 11px var(--mono); text-overflow: ellipsis; }
