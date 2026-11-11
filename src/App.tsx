@@ -923,7 +923,7 @@ function App() {
             return <>
               <div className="pool-detail-hero">
                 <button className="back-link" onClick={() => navigate('pools')}>← All pools</button>
-                <div className="pool-detail-title"><div className="marks"><TokenMark label={base.ticker} /><TokenMark label={quoteToken.ticker} warm /></div><div><span className="eyebrow"><i /> POOL DETAIL</span><h1>{pool.name}</h1><p><span className={pool.available ? 'live-dot' : 'offline-dot'} /> {pool.available ? 'Pool active' : 'Pool unavailable'} · {pool.feeBps} bps total fee</p></div></div>
+                <div className="pool-detail-title"><div className="marks"><TokenMark label={base.ticker} /><TokenMark label={quoteToken.ticker} warm /></div><div><span className="eyebrow"><i /> POOL DETAIL</span><div className="pool-title-row"><h1>{pool.name}</h1>{pool.onFire && <span className="fire-badge" title={`${pool.activity24h ?? 0} settled operations in the last 24 hours`}>🔥 On fire</span>}</div><p><span className={pool.available ? 'live-dot' : 'offline-dot'} /> {pool.available ? 'Pool active' : 'Pool unavailable'} · {pool.feeBps} bps total fee</p></div></div>
                 <button className="primary compact" onClick={() => { replaceSwapUrl(pool, pool.baseAssetId); setSellAssetId(pool.baseAssetId); setAmount(''); setReceiveAmount(''); setQuote(null); setPage('swap') }}>Trade this pool</button>
               </div>
 
