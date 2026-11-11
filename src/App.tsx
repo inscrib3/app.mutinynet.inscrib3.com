@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 import { firstFormError, MAX_WALLET_AMOUNT, MIN_PROTOCOL_FEE_BPS, parseDisplayAmount, rawAmount, validateAssetForm, validatePoolForm, type AssetFormInput, type PoolFormInput } from './form-validation'
+import { loadSavedPayments, savePayment, type PaymentKind, type SavedPayment } from './open-payments'
 import { describeWalletError, errorMessage, LOCKED_WALLET, MISSING_WALLET, WALLET_INSTALL_URL, type WalletIssue } from './wallet-issues'
 
 const API = import.meta.env.VITE_API_URL ?? '/api'
@@ -10,6 +11,8 @@ const NETWORK_LABEL = NETWORK === 'mainnet' ? 'MAINNET' : 'MUTINYNET'
 const WALLET_NETWORK = NETWORK === 'mainnet' ? 'bitcoin' : 'mutinynet'
 const APP_NETWORK_NAME = NETWORK === 'mainnet' ? 'Mainnet' : 'Mutinynet (testnet)'
 const SWITCH_NETWORK_LABEL = NETWORK === 'mainnet' ? 'Switch to Mainnet' : 'Switch to testnet'
+// Every Arkade output the wallet funds carries at least this many sats (the API's DUST).
+const DUST_SATS = 330n
 const OPEN_REQUEST_STATUSES: ReadonlyArray<SwapRequest['status']> = ['pending-funding', 'funded', 'sweeping']
 const EMPTY_ASSET_FORM = { name: '', ticker: '', supply: '', decimals: '0', icon: '' }
 const ASSET_FIELD_LABELS: Record<keyof AssetFormInput, string> = { name: 'Name', ticker: 'Ticker', supply: 'Initial supply', decimals: 'Decimals', icon: 'Icon URL' }
@@ -190,6 +193,8 @@ function ratio(numerator: bigint, denominator: bigint, precision = 8): string {
   return fraction ? `${whole.toLocaleString()}.${fraction}` : whole.toLocaleString()
 }
 
+function maxBigInt(a: bigint, b: bigint): bigint { return a > b ? a : b }
+
 function walletNumber(value: bigint, name: string): number {
   if (value < 0n || value > MAX_WALLET_AMOUNT) throw new Error(`${name} exceeds the wallet safe integer range`)
   return Number(value)
@@ -278,7 +283,7 @@ function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals
   useEffect(() => {
     const controller = new AbortController()
     const load = () => api<PriceHistory>(`/v1/pools/${encodeURIComponent(pool.id)}/prices?timeframe=${timeframe}`, { signal: controller.signal })
-      .then((history) => { setPoints(history.points); setChartError('') })
+      .then((history) => { setPoints(Array.isArray(history.points) ? history.points : []); setChartError('') })
       .catch((cause: unknown) => { if ((cause as Error).name !== 'AbortError') setChartError(cause instanceof Error ? cause.message : String(cause)) })
     void load()
     const refresh = window.setInterval(() => void load(), 15_000)
@@ -355,7 +360,7 @@ function FieldError({ message, value }: { message?: string; value: string }) {
   return <span className="field-error" role="alert">{message}</span>
 }
 
-interface RequestProgress { status: SwapRequest['status']; settlementTxid?: string; error?: string }
+interface RequestProgress { status: SwapRequest['status']; fundingTxid?: string; settlementTxid?: string; error?: string }
 
 function describeRequest(noun: string, request: RequestProgress): { title: string; detail: string } {
   switch (request.status) {
@@ -364,16 +369,50 @@ function describeRequest(noun: string, request: RequestProgress): { title: strin
     case 'refunded': return { title: `${noun} refunded`, detail: `Refund ${short(request.settlementTxid ?? '')}. Your funds are back, so you can retry.` }
     case 'funded':
     case 'sweeping': return { title: `${noun} funded`, detail: 'Waiting for the next pool sweep…' }
-    case 'pending-funding': return { title: `${noun} created`, detail: 'Waiting for the wallet payment…' }
+    case 'pending-funding': return request.fundingTxid
+      ? { title: 'Payment sent, not registered yet', detail: `Payment ${short(request.fundingTxid, 7)} reached the contract, but the server has not registered it. Retry registration; do not pay again.` }
+      : { title: `${noun} created`, detail: 'Waiting for the wallet payment…' }
   }
 }
 
-function RequestNotice({ noun, request, onDismiss }: { noun: string; request: RequestProgress; onDismiss: () => void }) {
+function RequestNotice({ noun, request, busy, onDismiss, onRetryRegistration }: {
+  noun: string; request: RequestProgress; busy: boolean; onDismiss: () => void; onRetryRegistration: () => void
+}) {
   const { title, detail } = describeRequest(noun, request)
+  const paymentUnregistered = request.status === 'pending-funding' && Boolean(request.fundingTxid)
   return <div className={`notice status ${request.status}`}>
     <b>{title}</b><span>{detail}</span>
-    {request.status === 'failed' ? <button type="button" className="notice-dismiss" onClick={onDismiss}>Dismiss</button> : <i />}
+    {request.status === 'failed' && <button type="button" className="notice-dismiss" onClick={onDismiss}>Dismiss</button>}
+    {paymentUnregistered && <button type="button" className="notice-dismiss" onClick={onRetryRegistration} disabled={busy}>Retry registration</button>}
+    {request.status !== 'failed' && !paymentUnregistered && <i />}
   </div>
+}
+
+function isRequestLocked(request: RequestProgress | null): boolean {
+  return request !== null && (OPEN_REQUEST_STATUSES.includes(request.status) || request.status === 'failed')
+}
+
+// The server reports fundingTxid only after registering the payment; until then keep the one the wallet returned.
+function withKnownFundingTxid<T extends { fundingTxid?: string }>(next: T, known: { fundingTxid?: string } | null | undefined): T {
+  return { ...next, fundingTxid: next.fundingTxid ?? known?.fundingTxid }
+}
+
+// A request without a payment id was never paid as far as this browser knows, so it is not worth restoring.
+async function restoreOpenRequest<T extends RequestProgress>(path: string, saved: SavedPayment | undefined): Promise<T | null> {
+  if (!saved) return null
+  try {
+    const current = withKnownFundingTxid(await api<T>(path), saved)
+    if (current.status === 'pending-funding' && !current.fundingTxid) return null
+    return isRequestLocked(current) ? current : null
+  } catch { return null }
+}
+
+async function restoreFundedPoolCreation(saved: SavedPayment | undefined): Promise<PoolCreation | null> {
+  if (!saved?.fundingTxid) return null
+  try {
+    const creation = await api<PoolCreation>(`/v1/pool-creations/${encodeURIComponent(saved.id)}`)
+    return creation.status === 'awaiting-funding' ? { ...creation, fundingTxid: saved.fundingTxid } : null
+  } catch { return null }
 }
 
 function App() {
@@ -423,6 +462,7 @@ function App() {
   const [poolCreation, setPoolCreation] = useState<PoolCreation | null>(null)
   const [creationStep, setCreationStep] = useState('')
   const [deployment, setDeployment] = useState<DeploymentInfo | null>(null)
+  const [paymentsRestored, setPaymentsRestored] = useState(false)
   const [points, setPoints] = useState<PointsSummary | null>(null)
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([])
 
@@ -441,8 +481,9 @@ function App() {
   const sellAmountCheck = parseDisplayAmount(amount, sellDecimals)
   const walletOnWrongNetwork = walletNetwork !== null && walletNetwork.network !== WALLET_NETWORK
   const walletReady = Boolean(address) && !walletOnWrongNetwork
-  const swapLocked = request !== null && (OPEN_REQUEST_STATUSES.includes(request.status) || request.status === 'failed')
-  const liquidityLocked = liquidityRequest !== null && (OPEN_REQUEST_STATUSES.includes(liquidityRequest.status) || liquidityRequest.status === 'failed')
+  const swapLocked = isRequestLocked(request)
+  const liquidityLocked = isRequestLocked(liquidityRequest)
+  const poolOpeningPending = poolCreation?.status === 'awaiting-funding' && Boolean(poolCreation.fundingTxid)
   const baseAsset = assets.find((asset) => asset.assetId === pool?.baseAssetId)
   const quoteAsset = assets.find((asset) => asset.assetId === pool?.quoteAssetId)
   const lpAsset = assets.find((asset) => asset.assetId === pool?.lpAssetId)
@@ -654,7 +695,7 @@ function App() {
 
   function setMaxAmount() {
     setQuoteMode('input'); setReceiveAmount(''); setQuote(null)
-    if (sellAssetId === 'btc') setAmount(editableAmount(BigInt(Math.max(0, btcBalance - 330)), 8))
+    if (sellAssetId === 'btc') setAmount(editableAmount(maxBigInt(0n, BigInt(btcBalance) - DUST_SATS), 8))
     else if (sellAsset) setAmount(editableAmount(BigInt(sellAsset.amount), sellDecimals))
   }
 
@@ -821,6 +862,27 @@ function App() {
   }, [waitingForUnlock])
 
   useEffect(() => {
+    const saved = loadSavedPayments()
+    void Promise.all([
+      restoreOpenRequest<SwapRequest>(`/v1/swaps/${saved.swap?.id}`, saved.swap),
+      restoreOpenRequest<LiquidityRequest>(`/v1/liquidity/${saved.liquidity?.id}`, saved.liquidity),
+      restoreFundedPoolCreation(saved.poolCreation),
+    ]).then(([swapRequest, openLiquidity, fundedPool]) => {
+      if (swapRequest) setRequest(swapRequest)
+      if (openLiquidity) { setLiquidityRequest(openLiquidity); setToast('A liquidity request is still in progress. Open Add or Remove on the swap page to follow it.') }
+      if (fundedPool) { setPoolCreation(fundedPool); setToast('A funded pool has not opened yet. Go to Create → Create pool and click Retry opening.') }
+    }).finally(() => setPaymentsRestored(true))
+  }, [])
+
+  useEffect(() => {
+    if (!paymentsRestored) return
+    const remember = (kind: PaymentKind, open: { id: string; fundingTxid?: string } | null) => savePayment(kind, open && { id: open.id, fundingTxid: open.fundingTxid })
+    remember('swap', swapLocked ? request : null)
+    remember('liquidity', liquidityLocked ? liquidityRequest : null)
+    remember('poolCreation', poolOpeningPending ? poolCreation : null)
+  }, [paymentsRestored, request, swapLocked, liquidityRequest, liquidityLocked, poolCreation, poolOpeningPending])
+
+  useEffect(() => {
     if (!toast) return
     const timer = window.setTimeout(() => setToast(''), 6_000)
     return () => window.clearTimeout(timer)
@@ -855,7 +917,7 @@ function App() {
     if (!request || ['settled', 'refunded', 'failed'].includes(request.status)) return
     const timer = window.setInterval(() => {
       api<SwapRequest>(`/v1/swaps/${request.id}`).then((next) => {
-        setRequest(next)
+        setRequest((current) => withKnownFundingTxid(next, current))
         if (next.status === 'settled') { setAmount(''); setReceiveAmount(''); setQuote(null); setQuoteMode('input') }
         if (next.status === 'settled' || next.status === 'refunded') { void refreshAssets(); void refreshPools(); void refreshPoints() }
       }).catch(() => undefined)
@@ -867,7 +929,7 @@ function App() {
     if (!liquidityRequest || ['settled', 'refunded', 'failed'].includes(liquidityRequest.status)) return
     const timer = window.setInterval(() => {
       api<LiquidityRequest>(`/v1/liquidity/${liquidityRequest.id}`).then((next) => {
-        setLiquidityRequest(next)
+        setLiquidityRequest((current) => withKnownFundingTxid(next, current))
         if (next.status === 'settled') setLiquidityAmount('')
         if (next.status === 'settled' || next.status === 'refunded') { void refreshAssets(); void refreshPools() }
       }).catch(() => undefined)
@@ -973,11 +1035,25 @@ function App() {
         { assetId: ledger.assetId, amount: safeBase }, { assetId: control.assetId, amount: 1 },
       ]
       fundingTxid = await window.arkade.sendAsset(creation.bootstrapAddress, fundingAssets, walletNumber(BigInt(creation.bootstrapSats), 'bootstrap satoshis'))
-      setCreationStep('5/5 · Open the covenant pool')
-      const opened = await api<PoolCreation>(`/v1/pool-creations/${encodeURIComponent(creation.id)}/open`, { method: 'POST', body: JSON.stringify({ fundingTxid }) })
-      setPoolCreation(opened); setCreationStep('Pool opened'); setPoolForm(DEFAULT_POOL_FORM)
-      await Promise.all([refreshAssets(), refreshPools(), refreshPoints()])
-    } catch (cause) { setError(fundingTxid ? paymentSentMessage(fundingTxid, cause, 'Do not create this pool again') : errorMessage(cause)) }
+      setPoolCreation({ ...creation, fundingTxid })
+      await openFundedPool(creation, fundingTxid)
+    } catch (cause) { setError(fundingTxid ? paymentSentMessage(fundingTxid, cause, 'Click Retry opening below; do not create this pool again') : errorMessage(cause)) }
+    finally { setBusy(false) }
+  }
+
+  async function openFundedPool(creation: PoolCreation, fundingTxid: string) {
+    setCreationStep('5/5 · Open the covenant pool')
+    const opened = await api<PoolCreation>(`/v1/pool-creations/${encodeURIComponent(creation.id)}/open`, { method: 'POST', body: JSON.stringify({ fundingTxid }) })
+    setPoolCreation(opened); setCreationStep('Pool opened'); setPoolForm(DEFAULT_POOL_FORM)
+    await Promise.all([refreshAssets(), refreshPools(), refreshPoints()])
+  }
+
+  async function retryPoolOpening() {
+    if (!poolCreation?.fundingTxid) return
+    const { fundingTxid } = poolCreation
+    setBusy(true); setError('')
+    try { await openFundedPool(poolCreation, fundingTxid) }
+    catch (cause) { setError(paymentSentMessage(fundingTxid, cause, 'Try again in a moment; do not create this pool again')) }
     finally { setBusy(false) }
   }
 
@@ -1012,16 +1088,28 @@ function App() {
       fundingTxid = sellAssetId === 'btc'
         ? await window.arkade.sendToAddress(intent.contractAddress, fundingSats)
         : await window.arkade.sendAsset(intent.contractAddress, [{ assetId: sellAssetId, amount: walletNumber(raw, 'asset funding') }], fundingSats)
-      const funded = await api<SwapRequest>(`/v1/swaps/${intent.id}/funding`, { method: 'POST', body: JSON.stringify({ txid: fundingTxid }) })
-      setRequest(funded)
+      setRequest(await registerFunding<SwapRequest>(`/v1/swaps/${intent.id}`, fundingTxid))
     } catch (cause) { reportFundingFailure(cause, fundingTxid, setRequest) }
     finally { setBusy(false) }
   }
 
   // Once the wallet has paid, the request must stay open (and the button locked) so nobody pays twice.
-  function reportFundingFailure(cause: unknown, fundingTxid: string | undefined, clearRequest: (value: null) => void) {
-    if (!fundingTxid) { clearRequest(null); setError(errorMessage(cause)); return }
-    setError(paymentSentMessage(fundingTxid, cause, 'Do not pay again; check My activity'))
+  function reportFundingFailure<T extends { fundingTxid?: string }>(cause: unknown, fundingTxid: string | undefined, updateRequest: (update: (current: T | null) => T | null) => void) {
+    if (!fundingTxid) { updateRequest(() => null); setError(errorMessage(cause)); return }
+    updateRequest((current) => current && { ...current, fundingTxid })
+    setError(paymentSentMessage(fundingTxid, cause, 'Click Retry registration below; do not pay again'))
+  }
+
+  function registerFunding<T>(requestPath: string, txid: string): Promise<T> {
+    return api<T>(`${requestPath}/funding`, { method: 'POST', body: JSON.stringify({ txid }) })
+  }
+
+  async function retryRegistration<T extends { id: string; fundingTxid?: string }>(requestPath: string, open: T, setOpen: (value: T) => void) {
+    if (!open.fundingTxid) return
+    setBusy(true); setError('')
+    try { setOpen(await registerFunding<T>(requestPath, open.fundingTxid)) }
+    catch (cause) { setError(paymentSentMessage(open.fundingTxid, cause, 'Try again in a moment; do not pay again')) }
+    finally { setBusy(false) }
   }
 
   function paymentSentMessage(fundingTxid: string, cause: unknown, nextStep: string): string {
@@ -1043,9 +1131,9 @@ function App() {
         ? [...(pool.baseAssetId === 'btc' ? [] : [{ assetId: pool.baseAssetId, amount: walletNumber(BigInt(intent.baseAmount), 'base funding') }]), { assetId: pool.quoteAssetId, amount: walletNumber(BigInt(intent.quoteAmount), 'quote funding') }]
         : [{ assetId: pool.lpAssetId, amount: walletNumber(BigInt(intent.lpAmount), 'LP funding') }]
       fundingTxid = await window.arkade.sendAsset(intent.contractAddress, fundingAssets, mode === 'deposit'
-        ? walletNumber(pool.baseAssetId === 'btc' ? BigInt(intent.baseAmount) + 330n : 330n, 'deposit BTC funding')
+        ? walletNumber(depositFundingSats(pool, BigInt(intent.baseAmount)), 'deposit BTC funding')
         : undefined)
-      setLiquidityRequest(await api<LiquidityRequest>(`/v1/liquidity/${intent.id}/funding`, { method: 'POST', body: JSON.stringify({ txid: fundingTxid }) }))
+      setLiquidityRequest(await registerFunding<LiquidityRequest>(`/v1/liquidity/${intent.id}`, fundingTxid))
     } catch (cause) { reportFundingFailure(cause, fundingTxid, setLiquidityRequest) }
     finally { setBusy(false) }
   }
@@ -1057,9 +1145,12 @@ function App() {
   const swapBlocker = describeSwapBlocker()
   const liquidityBlocker = describeLiquidityBlocker()
   const assetFormBlocker = firstFormError(assetValidation.errors, ASSET_FIELD_LABELS)
-  const poolFormBlocker = deployment ? firstFormError(poolValidation.errors, POOL_FIELD_LABELS) : 'Pool creation is unavailable right now'
+  const poolFormBlocker = !paymentsRestored ? 'Checking unfinished payments…'
+    : poolOpeningPending ? 'Finish opening your funded pool first'
+    : deployment ? firstFormError(poolValidation.errors, POOL_FIELD_LABELS) : 'Pool creation is unavailable right now'
 
   function describeSwapBlocker(): string | null {
+    if (!paymentsRestored) return 'Checking unfinished payments…'
     if (request && swapLocked) return request.status === 'failed' ? 'Dismiss the failed swap to retry' : 'Swap in progress…'
     if (!pool) return 'Select a token pair'
     if (!pool.available) return 'Pool unavailable'
@@ -1067,10 +1158,17 @@ function App() {
     if ('error' in typedAmount) return typedAmount.error
     if (raw && raw > walletBalance(sellAssetId)) return `Insufficient ${sellTicker} balance`
     if (!quote) return 'Finding best price…'
+    if (raw && swapFundingSats(raw, quote) > walletBalance('btc')) return sellAssetId === 'btc' ? 'Insufficient BTC balance (network fee included)' : 'Not enough BTC for the network fee'
     return null
   }
 
+  // Mirrors the API's swapFundingSats: the BTC the wallet sends with a swap.
+  function swapFundingSats(sellAmount: bigint, swapQuote: Quote): bigint {
+    return DUST_SATS + (sellAssetId === 'btc' ? sellAmount : BigInt(swapQuote.carrierFeeSats))
+  }
+
   function describeLiquidityBlocker(): string | null {
+    if (!paymentsRestored) return 'Checking unfinished payments…'
     if (liquidityRequest && liquidityLocked) return liquidityRequest.status === 'failed' ? 'Dismiss the failed request to retry' : 'Request in progress…'
     if (!pool?.available) return 'Pool unavailable'
     const typedAmount = parseDisplayAmount(liquidityAmount, mode === 'withdraw' ? lpDecimals : baseDecimals)
@@ -1085,7 +1183,12 @@ function App() {
     if (mode === 'withdraw') return preview.lp > walletBalance(target.lpAssetId) ? 'LP' : null
     if (preview.base > walletBalance(target.baseAssetId)) return baseTicker
     if (preview.quote > walletBalance(target.quoteAssetId)) return quoteTicker
+    if (depositFundingSats(target, preview.base) > walletBalance('btc')) return 'BTC (network fee included)'
     return null
+  }
+
+  function depositFundingSats(target: Pool, baseAmount: bigint): bigint {
+    return DUST_SATS + (target.baseAssetId === 'btc' ? baseAmount : 0n)
   }
 
   return (
@@ -1179,8 +1282,8 @@ function App() {
               <button className="primary" onClick={() => void submitLiquidity()} disabled={busy || connecting || (walletReady && liquidityBlocker !== null)}>{busy && <Spinner />}{walletActionLabel ?? liquidityBlocker ?? (mode === 'deposit' ? 'Fund liquidity deposit' : 'Fund LP withdrawal')}</button>
             </>}
             {error && <div className="notice error"><b>Transaction unavailable</b><span>{error}</span></div>}
-            {mode === 'swap' && request && <RequestNotice noun="Swap" request={request} onDismiss={() => setRequest(null)} />}
-            {mode !== 'swap' && liquidityRequest && <RequestNotice noun="Liquidity request" request={liquidityRequest} onDismiss={() => setLiquidityRequest(null)} />}
+            {mode === 'swap' && request && <RequestNotice noun="Swap" request={request} busy={busy} onDismiss={() => setRequest(null)} onRetryRegistration={() => void retryRegistration(`/v1/swaps/${request.id}`, request, setRequest)} />}
+            {mode !== 'swap' && liquidityRequest && <RequestNotice noun="Liquidity request" request={liquidityRequest} busy={busy} onDismiss={() => setLiquidityRequest(null)} onRetryRegistration={() => void retryRegistration(`/v1/liquidity/${liquidityRequest.id}`, liquidityRequest, setLiquidityRequest)} />}
             {controlledPoolAssets.length > 0 && <div className="notice asset-risk"><b>Controlled asset supply</b><span>{controlledPoolAssets.map((info) => `${info.assetId === pool?.baseAssetId ? baseTicker : quoteTicker}: ${short(info.controlAssetId ?? '', 8)}`).join(' · ')}. Holders of these control assets may authorize additional issuance, which can affect pool value.</span></div>}
             <p className="security"><span>◇</span> Your wallet funds a covenant-bound request. The coordinator cannot redirect your payout.</p>
           </div>
@@ -1309,6 +1412,7 @@ function App() {
               {controlledCreationAssets.length > 0 && <div className="notice asset-risk"><b>Reissuable asset warning</b><span>{controlledCreationAssets.map((asset) => `${asset.metadata?.ticker ?? short(asset.assetId)} · control ${short(asset.controlAssetId!, 8)}`).join(' · ')}. Additional supply may be issued by the control holder.</span></div>}
               <button className="primary" disabled={busy || connecting || (walletReady && poolFormBlocker !== null)} onClick={() => void createPool()}>{busy && <Spinner />}{walletActionLabel ?? poolFormBlocker ?? 'Issue pool assets & open pool'}</button>
               {creationStep && <div className="creation-progress"><i className={poolCreation?.status === 'opened' ? 'done' : ''} /><span>{creationStep}</span></div>}
+              {poolOpeningPending && <button className="secondary" disabled={busy} onClick={() => void retryPoolOpening()}>Retry opening</button>}
               {poolCreation && <div className="result-box"><span>Status</span><b>{poolCreation.status}</b>{poolCreation.status === 'opened' && <><span>Points earned</span><b className="points-earned">+10 PTS</b></>}<span>Bootstrap covenant</span><code>{poolCreation.bootstrapAddress}</code>{poolCreation.openingTxid && <><span>Opening transaction</span><code>{poolCreation.openingTxid}</code></>}</div>}
             </article>
             <aside className="create-info"><span className="panel-label">ONE ATOMIC FUNDING</span><h3>Permissionless, not custodial</h3><p>Inscrib3 issues the control, LP, and ledger assets, then funds liquidity, technical carriers, and the fixed creation fee in one bootstrap payment. The contract opens and distributes everything atomically.</p><ul><li>BTC remains native and unwrapped</li><li>The creation fee reaches the stable Treasury Vault</li><li>Protocol fee is at least 0.30% and below the total fee</li></ul><a className="panel-doc-link" href="https://docs.inscrib3.com/app/pools-liquidity" target="_blank" rel="noreferrer">Pool and liquidity guide ↗</a></aside>
