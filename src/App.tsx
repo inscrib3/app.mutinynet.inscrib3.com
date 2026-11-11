@@ -22,6 +22,13 @@ interface NetworkInfo {
   arkServerUrl: string
 }
 
+interface ProviderState {
+  isConnected: boolean
+  isUnlocked: boolean
+  network: string | null
+  accounts: string[]
+}
+
 interface AssetInfo {
   assetId: string
   amount: number
@@ -138,6 +145,7 @@ function poolSlug(firstTicker: string, secondTicker: string): string {
 interface ArkadeProvider {
   isArkade: true
   connect(): Promise<string[]>
+  getProviderState?(): Promise<ProviderState>
   getAddress(): Promise<string>
   getNetwork(): Promise<NetworkInfo>
   getBalance(): Promise<BalanceInfo>
@@ -626,9 +634,14 @@ function App() {
 
   async function connect() {
     setError('')
-    if (!window.arkade) { setError('Inscrib3 Wallet extension was not found.'); return }
+    if (!window.arkade) {
+      const message = 'Inscrib3 Wallet extension was not found.'
+      setError(message); window.alert(message); return
+    }
     setBusy(true)
     try {
+      const state = await window.arkade.getProviderState?.()
+      if (state && !state.isUnlocked) throw new Error('Inscrib3 Wallet is locked. Open the extension, enter your password, then click Connect wallet again.')
       const [connected] = await window.arkade.connect()
       await assertWalletNetwork(window.arkade)
       const nextAddress = connected ?? await window.arkade.getAddress()
@@ -636,7 +649,10 @@ function App() {
       const [nextAssets, nextBalance] = await Promise.all([window.arkade.getAssets(), window.arkade.getBalance()])
       assertProviderAmounts(nextAssets, nextBalance)
       setAssets(nextAssets); setBtcBalance(nextBalance.available)
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause)
+      setError(message); window.alert(message)
+    }
     finally { setBusy(false) }
   }
 
