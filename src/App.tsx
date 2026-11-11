@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 import { firstFormError, MAX_WALLET_AMOUNT, MIN_PROTOCOL_FEE_BPS, parseDisplayAmount, rawAmount, validateAssetForm, validatePoolForm, type AssetFormInput, type PoolFormInput } from './form-validation'
 import { loadSavedPayments, savePayment, type PaymentKind, type SavedPayment } from './open-payments'
-import { describeWalletError, errorMessage, LOCKED_WALLET, MISSING_WALLET, WALLET_INSTALL_URL, type WalletIssue } from './wallet-issues'
+import { describeWalletError, errorMessage, MISSING_WALLET, WALLET_INSTALL_URL, type WalletIssue } from './wallet-issues'
 
 const API = import.meta.env.VITE_API_URL ?? '/api'
 const NETWORK = import.meta.env.VITE_NETWORK ?? 'mutinynet'
@@ -33,13 +33,6 @@ interface NetworkInfo {
   displayName: string
   isTestnet: boolean
   arkServerUrl: string
-}
-
-interface ProviderState {
-  isConnected: boolean
-  isUnlocked: boolean
-  network: string | null
-  accounts: string[]
 }
 
 interface AssetInfo {
@@ -165,7 +158,6 @@ function poolSlug(firstTicker: string, secondTicker: string): string {
 interface ArkadeProvider {
   isArkade: true
   connect(): Promise<string[]>
-  getProviderState?(): Promise<ProviderState>
   getAddress(): Promise<string>
   getNetwork(): Promise<NetworkInfo>
   getBalance(): Promise<BalanceInfo>
@@ -964,10 +956,8 @@ function App() {
     if (!provider) { setWalletIssue(MISSING_WALLET); return }
     setConnecting(true); setWalletIssue(null)
     try {
-      // The wallet reports isUnlocked: false for every site it hasn't connected yet,
-      // so this only proves "locked" for an already-connected site.
-      const state = await provider.getProviderState?.()
-      if (state?.isConnected && !state.isUnlocked) { setWalletIssue(LOCKED_WALLET); return }
+      // A locked wallet opens its own unlock window (older versions answer
+      // "Wallet is locked", which shows the unlock banner instead).
       const [connected] = await provider.connect()
       setPoints(null); setLeaderboard([])
       await loadWallet(provider, connected)
@@ -978,7 +968,10 @@ function App() {
   async function switchWalletNetwork() {
     const provider = window.arkade
     if (!provider?.switchNetwork) { setShowSwitchSteps(true); return }
-    try { await provider.switchNetwork(WALLET_NETWORK) } catch (cause) { showWalletError(cause) }
+    try { await provider.switchNetwork(WALLET_NETWORK) } catch (cause) {
+      if (describeWalletError(cause).kind === 'rejected') setToast(`Network switch declined in Inscrib3 Wallet. This app needs ${APP_NETWORK_NAME}.`)
+      else showWalletError(cause)
+    }
   }
 
   function requireWallet() {

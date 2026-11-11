@@ -14,7 +14,7 @@ export const MISSING_WALLET: WalletIssue = {
   detail: 'Install the Inscrib3 Wallet browser extension, then reload this page.',
 }
 
-export const LOCKED_WALLET: WalletIssue = {
+const LOCKED_WALLET: WalletIssue = {
   kind: 'locked',
   title: 'Unlock Inscrib3 Wallet to continue',
   detail: 'Click the Inscrib3 icon in your browser toolbar and enter your password. The connection continues automatically.',
