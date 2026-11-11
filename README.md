@@ -62,9 +62,10 @@ Learn more about the provider:
 Permissionless pools default to a **1.00% total swap fee**:
 
 - **0.70%** remains in the pool for liquidity providers;
-- **0.30%** accrues to the fixed protocol treasury.
+- **0.30%** accrues to the stable protocol Treasury Vault.
 
-Creating a pool costs **10,000 sats** on Mutinynet. The initial reserve ratio establishes the initial
+Creating a pool costs **10,000 sats** on Mutinynet. The fee, initial liquidity, and technical carriers
+are funded together in one atomic bootstrap payment. The initial reserve ratio establishes the initial
 price; reserve depth determines how quickly price moves as users trade.
 
 Assets with a `controlAssetId` are reissuable by the control holder. The interface displays a

@@ -43,8 +43,9 @@ interface Pool {
   quoteAssetId: string
   lpAssetId: string
   feeBps: number
-  protocolFeeBps?: number
-  treasuryAddress?: string
+  protocolFeeBps: number
+  treasuryAddress: string
+  creationFeeSats: string
   accruedBaseFees?: string
   accruedQuoteFees?: string
   baseReserve?: string
@@ -66,8 +67,9 @@ interface Quote {
   requestedOutputAmount?: string
   priceImpactBps: number
   poolTxid: string
-  protocolFeeBps?: number
-  lpFeeBps?: number
+  protocolFeeBps: number
+  lpFeeBps: number
+  carrierFeeSats: string
 }
 
 interface SwapRequest {
@@ -77,13 +79,14 @@ interface SwapRequest {
   contractAddress: string
   sellAssetId?: string
   sellAmount?: string
+  fundingSats: string
   fundingTxid?: string
   settlementTxid?: string
   error?: string
   createdAt?: number
 }
 
-interface LiquidityRequest extends SwapRequest {
+interface LiquidityRequest extends Omit<SwapRequest, 'fundingSats'> {
   kind: 'deposit' | 'withdraw'
   baseAmount: string
   quoteAmount: string
@@ -94,6 +97,8 @@ interface IssueAssetResult { arkTxId: string; assetId: string }
 interface PoolCreation {
   id: string
   pool: Pool
+  baseAmount: string
+  quoteAmount: string
   bootstrapAddress: string
   bootstrapSats: string
   status: 'awaiting-funding' | 'opened'
@@ -269,6 +274,28 @@ function App() {
     return { ticker, decimals, name: assetId === 'btc' ? 'Native Bitcoin' : walletAsset?.metadata?.name ?? catalogAsset?.metadata?.name ?? poolInfo?.metadata?.name ?? short(assetId, 10), controlled: walletAsset?.controlAssetId ?? catalogAsset?.controlAssetId ?? poolInfo?.controlAssetId }
   }
 
+  const creationBaseDetails = poolForm.baseAssetId ? tokenDetails(poolForm.baseAssetId) : undefined
+  const creationQuoteDetails = poolForm.quoteAssetId ? tokenDetails(poolForm.quoteAssetId) : undefined
+  const creationBaseAmount = creationBaseDetails ? rawAmount(poolForm.baseAmount, creationBaseDetails.decimals) : null
+  const creationQuoteAmount = creationQuoteDetails ? rawAmount(poolForm.quoteAmount, creationQuoteDetails.decimals) : null
+  const initialLiquiditySummary = creationBaseAmount && creationQuoteAmount && creationBaseDetails && creationQuoteDetails
+    ? `${displayAmount(creationBaseAmount, creationBaseDetails.decimals, 8)} ${creationBaseDetails.ticker} + ${displayAmount(creationQuoteAmount, creationQuoteDetails.decimals, 8)} ${creationQuoteDetails.ticker}`
+    : 'Enter both reserves'
+  const bootstrapSummary = (() => {
+    if (!poolCreation || !deployment) return null
+    const bootstrapSats = BigInt(poolCreation.bootstrapSats)
+    const creationFeeSats = BigInt(poolCreation.pool.creationFeeSats)
+    const btcLiquidity = poolCreation.pool.baseAssetId === 'btc' ? BigInt(poolCreation.baseAmount) : 0n
+    const carrierSats = bootstrapSats - creationFeeSats - btcLiquidity
+    const baseDetails = tokenDetails(poolCreation.pool.baseAssetId)
+    const quoteDetails = tokenDetails(poolCreation.pool.quoteAssetId)
+    const fundedAssets = [
+      ...(poolCreation.pool.baseAssetId === 'btc' ? [] : [`${displayAmount(poolCreation.baseAmount, baseDetails.decimals, 8)} ${baseDetails.ticker}`]),
+      `${displayAmount(poolCreation.quoteAmount, quoteDetails.decimals, 8)} ${quoteDetails.ticker}`,
+    ]
+    return { bootstrapSats, carrierSats, total: `${comma(bootstrapSats)} sats + ${fundedAssets.join(' + ')}` }
+  })()
+
   const normalizedTokenSearch = tokenSearch.trim().toLowerCase()
   const matchesTokenSearch = (assetId: string) => {
     if (!normalizedTokenSearch) return true
@@ -380,7 +407,7 @@ function App() {
       setPools(page.items)
       const params = new URLSearchParams(window.location.search)
       const linked = params.get('swap') ? page.items.find((item) => item.id === params.get('swap') && item.available) : undefined
-      const first = linked ?? page.items.find((p) => p.available && (p.protocolFeeBps ?? 0) > 0) ?? page.items.find((p) => p.available) ?? page.items[0]
+      const first = linked ?? page.items.find((p) => p.available && p.protocolFeeBps > 0) ?? page.items.find((p) => p.available) ?? page.items[0]
       if (first) {
         setPoolId(first.id)
         setSellAssetId(linked && params.get('side') === 'quote' ? first.quoteAssetId : first.baseAssetId)
@@ -533,39 +560,28 @@ function App() {
     try {
       await assertWalletNetwork(window.arkade)
       const stem = poolForm.id.toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 9) || 'POOL'
-      setCreationStep('1/6 · Issue the pool control asset')
+      setCreationStep('1/5 · Issue the pool control asset')
       const control = await window.arkade.issueAsset({ amount: 1, metadata: { ticker: `${stem}-CTRL`.slice(0, 16), decimals: 0 } })
-      setCreationStep('2/6 · Issue LP tokens')
+      setCreationStep('2/5 · Issue LP tokens')
       const lp = await window.arkade.issueAsset({ amount: safeBase, controlAssetId: control.assetId, metadata: { ticker: `${stem}-LP`.slice(0, 16), decimals: baseDecimals } })
-      setCreationStep('3/6 · Issue the covenant ledger asset')
+      setCreationStep('3/5 · Issue the covenant ledger asset')
       const ledger = await window.arkade.issueAsset({ amount: safeBase, controlAssetId: control.assetId, metadata: { ticker: `${stem}-LEDGER`.slice(0, 16), decimals: 0 } })
-      setCreationStep(`4/6 · Pay the ${comma(deployment.poolCreationFeeSats)} sat pool creation fee`)
-      const creationFeeTxid = await window.arkade.sendToAddress(deployment.platformTreasuryAddress, walletNumber(BigInt(deployment.poolCreationFeeSats), 'pool creation fee'))
-      setCreationStep('5/6 · Register and fund the pool covenant')
-      let creation: PoolCreation | undefined
-      let lastError: unknown
-      for (let attempt = 0; attempt < 12 && !creation; attempt++) {
-        if (attempt > 0) await new Promise((resolve) => window.setTimeout(resolve, 1500))
-        try {
-          creation = await api<PoolCreation>('/v1/pools', { method: 'POST', body: JSON.stringify({
-            id: poolForm.id, name: poolForm.name, baseAssetId: poolForm.baseAssetId, quoteAssetId: poolForm.quoteAssetId,
-            lpAssetId: lp.assetId, lpLedgerAssetId: ledger.assetId, controlAssetId: control.assetId,
-            feeBps, protocolFeeBps, payAddress: address, baseAmount: baseAmount.toString(), quoteAmount: quoteAmount.toString(), creationFeeTxid,
-          }) })
-        } catch (cause) {
-          lastError = cause
-          if (!(cause instanceof Error) || !cause.message.includes('payment')) throw cause
-        }
-      }
-      if (!creation) throw lastError instanceof Error ? lastError : new Error('Pool creation fee was not indexed in time')
+      setCreationStep('4/5 · Register the atomic bootstrap')
+      const creation = await api<PoolCreation>('/v1/pools', { method: 'POST', body: JSON.stringify({
+        id: poolForm.id, name: poolForm.name, baseAssetId: poolForm.baseAssetId, quoteAssetId: poolForm.quoteAssetId,
+        lpAssetId: lp.assetId, lpLedgerAssetId: ledger.assetId, controlAssetId: control.assetId,
+        feeBps, protocolFeeBps, payAddress: address, baseAmount: baseAmount.toString(), quoteAmount: quoteAmount.toString(),
+      }) })
       setPoolCreation(creation)
+      setCreationStep('4/5 · Fund liquidity, carriers, and creation fee atomically')
+      await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()))
       const fundingAssets = [
         ...(poolForm.baseAssetId === 'btc' ? [] : [{ assetId: poolForm.baseAssetId, amount: safeBase }]),
         { assetId: poolForm.quoteAssetId, amount: safeQuote }, { assetId: lp.assetId, amount: safeBase },
         { assetId: ledger.assetId, amount: safeBase }, { assetId: control.assetId, amount: 1 },
       ]
       const fundingTxid = await window.arkade.sendAsset(creation.bootstrapAddress, fundingAssets, walletNumber(BigInt(creation.bootstrapSats), 'bootstrap satoshis'))
-      setCreationStep('6/6 · Open the covenant pool')
+      setCreationStep('5/5 · Open the covenant pool')
       const opened = await api<PoolCreation>(`/v1/pool-creations/${encodeURIComponent(creation.id)}/open`, { method: 'POST', body: JSON.stringify({ fundingTxid }) })
       setPoolCreation(opened); setCreationStep('Pool opened'); await Promise.all([refreshAssets(), refreshPools()])
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
@@ -588,8 +604,7 @@ function App() {
   async function swap() {
     if (!address) return connect()
     if (!pool || !raw || !quote || !window.arkade) return
-    const btcFunding = sellAssetId === 'btc' ? raw + 330n : 0n
-    if (raw > MAX_WALLET_AMOUNT || btcFunding > MAX_WALLET_AMOUNT) { setError('This wallet version cannot safely send an amount above JavaScript’s safe integer limit.'); return }
+    if (raw > MAX_WALLET_AMOUNT) { setError('This wallet version cannot safely send an amount above JavaScript’s safe integer limit.'); return }
     setBusy(true); setError(''); setRequest(null)
     try {
       await assertWalletNetwork(window.arkade)
@@ -600,9 +615,10 @@ function App() {
         method: 'POST', body: JSON.stringify({ payAddress: address, sellAssetId, sellAmount: raw.toString(), minOutput: minOutput.toString() }),
       })
       setRequest(intent)
+      const fundingSats = walletNumber(BigInt(intent.fundingSats), 'swap BTC funding')
       const fundingTxid = sellAssetId === 'btc'
-        ? await window.arkade.sendToAddress(intent.contractAddress, walletNumber(raw + 330n, 'BTC funding'))
-        : await window.arkade.sendAsset(intent.contractAddress, [{ assetId: sellAssetId, amount: walletNumber(raw, 'asset funding') }])
+        ? await window.arkade.sendToAddress(intent.contractAddress, fundingSats)
+        : await window.arkade.sendAsset(intent.contractAddress, [{ assetId: sellAssetId, amount: walletNumber(raw, 'asset funding') }], fundingSats)
       const funded = await api<SwapRequest>(`/v1/swaps/${intent.id}/funding`, { method: 'POST', body: JSON.stringify({ txid: fundingTxid }) })
       setRequest(funded)
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
@@ -679,8 +695,10 @@ function App() {
 
               {quote && <div className="route-details">
               <div><span>Route</span><b>{sellTicker} <i>→</i> {buyTicker}</b></div>
-              <div><span>LP fee</span><b>{((pool!.feeBps - (pool!.protocolFeeBps ?? 0)) / 100).toFixed(2)}%</b></div>
-              <div><span>Protocol fee</span><b>{((pool!.protocolFeeBps ?? 0) / 100).toFixed(2)}%</b></div>
+              <div><span>Total fee</span><b>{(pool!.feeBps / 100).toFixed(2)}%</b></div>
+              <div><span>LP fee</span><b>{((pool!.feeBps - pool!.protocolFeeBps) / 100).toFixed(2)}%</b></div>
+              <div><span>Protocol fee</span><b>{(pool!.protocolFeeBps / 100).toFixed(2)}%</b></div>
+              {BigInt(quote.carrierFeeSats) > 0n && <div><span>Carrier fee</span><b>{comma(quote.carrierFeeSats)} sats</b></div>}
               <div><span>Price impact</span><b className={quote.priceImpactBps > 300 ? 'danger' : 'positive'}>{(quote.priceImpactBps / 100).toFixed(2)}%</b></div>
               <div><span>Slippage protection</span><b>{(slippage / 100).toFixed(2)}%</b></div>
               </div>}
@@ -739,7 +757,7 @@ function App() {
             const itemQuoteDecimals = item.quoteAssetId === 'btc' ? 8 : walletQuote?.metadata?.decimals ?? item.quoteAssetInfo?.metadata?.decimals ?? 0
             return <article className="pool-card" key={item.id}>
               <div className="pool-card-title"><div className="marks"><TokenMark label={itemBaseTicker} /><TokenMark label={itemQuoteTicker} warm /></div><div className="pool-title-content"><div className="pool-title-row"><h2>{item.name}</h2>{item.onFire && <span className="fire-badge" title={`${item.activity24h ?? 0} settled operations in the last 24 hours`}>🔥 On fire</span>}</div><span className={item.available ? 'live' : 'offline'}>{item.available ? 'Active' : 'Unavailable'}{item.onFire ? ` · ${item.swaps24h ?? 0} swaps · ${item.liquidityEvents24h ?? 0} liquidity updates / 24h` : ''}</span></div></div>
-              <div className="reserve-list"><div><span>{itemBaseTicker} reserve</span><b>{item.baseReserve ? displayAmount(item.baseReserve, itemBaseDecimals, 8) : '—'} {itemBaseTicker}</b></div><div><span>{itemQuoteTicker} reserve</span><b>{item.quoteReserve ? displayAmount(item.quoteReserve, itemQuoteDecimals, 6) : '—'} {itemQuoteTicker}</b></div><div><span>LP supply</span><b>{item.lpSupply ? displayAmount(item.lpSupply, itemBaseDecimals, 8) : '—'} LP</b></div><div><span>LP / protocol fee</span><b>{((item.feeBps - (item.protocolFeeBps ?? 0)) / 100).toFixed(2)}% / {((item.protocolFeeBps ?? 0) / 100).toFixed(2)}%</b></div>{item.protocolFeeBps ? <><div><span>Accrued {itemBaseTicker} fees</span><b>{item.accruedBaseFees ? displayAmount(item.accruedBaseFees, itemBaseDecimals, 8) : '0'} {itemBaseTicker}</b></div><div><span>Accrued {itemQuoteTicker} fees</span><b>{item.accruedQuoteFees ? displayAmount(item.accruedQuoteFees, itemQuoteDecimals, 6) : '0'} {itemQuoteTicker}</b></div></> : null}</div>
+              <div className="reserve-list"><div><span>{itemBaseTicker} reserve</span><b>{item.baseReserve ? displayAmount(item.baseReserve, itemBaseDecimals, 8) : '—'} {itemBaseTicker}</b></div><div><span>{itemQuoteTicker} reserve</span><b>{item.quoteReserve ? displayAmount(item.quoteReserve, itemQuoteDecimals, 6) : '—'} {itemQuoteTicker}</b></div><div><span>LP supply</span><b>{item.lpSupply ? displayAmount(item.lpSupply, itemBaseDecimals, 8) : '—'} LP</b></div><div><span>LP / protocol fee</span><b>{((item.feeBps - item.protocolFeeBps) / 100).toFixed(2)}% / {(item.protocolFeeBps / 100).toFixed(2)}%</b></div><div><span>Accrued {itemBaseTicker} fees</span><b>{item.accruedBaseFees ? displayAmount(item.accruedBaseFees, itemBaseDecimals, 8) : '0'} {itemBaseTicker}</b></div><div><span>Accrued {itemQuoteTicker} fees</span><b>{item.accruedQuoteFees ? displayAmount(item.accruedQuoteFees, itemQuoteDecimals, 6) : '0'} {itemQuoteTicker}</b></div></div>
               <div className="id-list"><div><span>Quote asset</span><code>{short(item.quoteAssetId, 10)}</code></div><div><span>LP asset</span><code>{short(item.lpAssetId, 10)}</code></div></div>
               {(item.baseAssetInfo?.controlled || item.quoteAssetInfo?.controlled) && <div className="pool-risk"><b>Controlled supply</b><span>{[item.baseAssetInfo, item.quoteAssetInfo].filter((info) => info?.controlled).map((info) => short(info!.controlAssetId ?? '', 8)).join(' · ')}</span></div>}
               {item.error && <p className="pool-error">{item.error}</p>}
@@ -775,16 +793,22 @@ function App() {
                 <label><span>Quote asset</span><select value={poolForm.quoteAssetId} onChange={(e) => setPoolForm({ ...poolForm, quoteAssetId: e.target.value })}><option value="">Select asset</option>{assets.filter((item) => item.assetId !== poolForm.baseAssetId).map((item) => <option key={item.assetId} value={item.assetId}>{item.metadata?.ticker ?? short(item.assetId)}</option>)}</select></label>
                 <label><span>Initial base reserve</span><input value={poolForm.baseAmount} onChange={(e) => setPoolForm({ ...poolForm, baseAmount: e.target.value })} placeholder="0" inputMode="decimal" /></label>
                 <label><span>Initial quote reserve</span><input value={poolForm.quoteAmount} onChange={(e) => setPoolForm({ ...poolForm, quoteAmount: e.target.value })} placeholder="0" inputMode="decimal" /></label>
-                <label><span>Total fee · bps</span><input value={poolForm.feeBps} onChange={(e) => setPoolForm({ ...poolForm, feeBps: e.target.value })} inputMode="numeric" /></label>
-                <label><span>Protocol fee · min 30 bps</span><input value={poolForm.protocolFeeBps} onChange={(e) => setPoolForm({ ...poolForm, protocolFeeBps: e.target.value })} inputMode="numeric" /></label>
+                <label><span>Total fee · bps</span><input value={poolForm.feeBps} onChange={(e) => setPoolForm({ ...poolForm, feeBps: e.target.value })} inputMode="numeric" min="31" /></label>
+                <label><span>Protocol fee · min 30 bps</span><input value={poolForm.protocolFeeBps} onChange={(e) => setPoolForm({ ...poolForm, protocolFeeBps: e.target.value })} inputMode="numeric" min="30" /></label>
               </div>
-              <div className="fee-summary"><div><span>Pool creation fee</span><b>{deployment ? `${comma(deployment.poolCreationFeeSats)} sats` : 'Unavailable'}</b></div><div><span>Protocol treasury</span><code>{deployment ? short(deployment.platformTreasuryAddress, 8) : 'Unavailable'}</code></div></div>
+              <div className="fee-summary">
+                <div><span>Initial liquidity</span><b title={initialLiquiditySummary}>{initialLiquiditySummary}</b></div>
+                <div><span>Creation fee · included</span><b>{deployment ? `${comma(deployment.poolCreationFeeSats)} sats` : 'Unavailable'}</b></div>
+                <div><span>Technical carriers</span><b>{bootstrapSummary ? `${comma(bootstrapSummary.carrierSats)} sats` : 'Calculated by API'}</b></div>
+                <div><span>Total bootstrap funding</span><b title={bootstrapSummary?.total}>{bootstrapSummary?.total ?? 'Returned before payment'}</b></div>
+                <div><span>Stable Treasury Vault</span><code title={deployment?.platformTreasuryAddress}>{deployment ? short(deployment.platformTreasuryAddress, 8) : 'Unavailable'}</code></div>
+              </div>
               {controlledCreationAssets.length > 0 && <div className="notice asset-risk"><b>Reissuable asset warning</b><span>{controlledCreationAssets.map((asset) => `${asset.metadata?.ticker ?? short(asset.assetId)} · control ${short(asset.controlAssetId!, 8)}`).join(' · ')}. Additional supply may be issued by the control holder.</span></div>}
               <button className="primary" disabled={busy} onClick={() => void createPool()}>{busy && <Spinner />}{address ? 'Issue pool assets & open pool' : 'Connect Inscrib3 Wallet'}</button>
               {creationStep && <div className="creation-progress"><i className={poolCreation?.status === 'opened' ? 'done' : ''} /><span>{creationStep}</span></div>}
               {poolCreation && <div className="result-box"><span>Status</span><b>{poolCreation.status}</b><span>Bootstrap covenant</span><code>{poolCreation.bootstrapAddress}</code>{poolCreation.openingTxid && <><span>Opening transaction</span><code>{poolCreation.openingTxid}</code></>}</div>}
             </article>
-            <aside className="create-info"><span className="panel-label">SIX WALLET APPROVALS</span><h3>Permissionless, not custodial</h3><p>Inscrib3 issues the control, LP, and ledger assets, pays the fixed creation fee, funds the bootstrap covenant, then the backend opens it atomically.</p><ul><li>BTC remains native and unwrapped</li><li>Asset/asset pools use dual-asset packets</li><li>Protocol fee can never be below 0.30%</li></ul></aside>
+            <aside className="create-info"><span className="panel-label">ONE ATOMIC FUNDING</span><h3>Permissionless, not custodial</h3><p>Inscrib3 issues the control, LP, and ledger assets, then funds liquidity, technical carriers, and the fixed creation fee in one bootstrap payment. The contract opens and distributes everything atomically.</p><ul><li>BTC remains native and unwrapped</li><li>The creation fee reaches the stable Treasury Vault</li><li>Protocol fee is at least 0.30% and below the total fee</li></ul></aside>
           </div>}
           {error && <div className="notice error create-error"><b>Creation unavailable</b><span>{error}</span></div>}
         </section> : <section className="view-page">
