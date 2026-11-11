@@ -130,7 +130,7 @@ function pathForPage(page: Page, poolId?: string): string {
   if (page === 'pools') return '/pools'
   if (page === 'pool' && poolId) return `/pools/${encodeURIComponent(poolId)}`
   if (page === 'create') return '/create'
-  if (page === 'activity') return poolId ? `/activity?pool=${encodeURIComponent(poolId)}` : '/activity'
+  if (page === 'activity') return '/activity'
   return '/'
 }
 
@@ -241,7 +241,7 @@ function App() {
   const [poolResults, setPoolResults] = useState<Pool[]>([])
   const [poolResultTotal, setPoolResultTotal] = useState(0)
   const [poolCursor, setPoolCursor] = useState<string | undefined>()
-  const [poolId, setPoolId] = useState(initialRoute.poolId ?? (initialRoute.page === 'activity' ? initialParams.get('pool') ?? '' : ''))
+  const [poolId, setPoolId] = useState(initialRoute.poolId ?? '')
   const [address, setAddress] = useState('')
   const [assets, setAssets] = useState<AssetInfo[]>([])
   const [btcBalance, setBtcBalance] = useState(0)
@@ -391,18 +391,13 @@ function App() {
   }
 
   function navigate(nextPage: Page, nextPoolId?: string) {
-    const targetPoolId = nextPoolId ?? (nextPage === 'activity' ? poolId : undefined)
-    const url = new URL(pathForPage(nextPage, targetPoolId), window.location.origin)
-    if (nextPage === 'swap' && poolId) {
-      url.searchParams.set('swap', poolId)
-      if (pool?.quoteAssetId === sellAssetId) url.searchParams.set('side', 'quote')
-      if (mode !== 'swap') url.searchParams.set('mode', mode)
-    }
+    const url = new URL(pathForPage(nextPage, nextPoolId), window.location.origin)
     if (nextPage === 'pools' && poolSearch.trim()) url.searchParams.set('q', poolSearch.trim())
     if (nextPage === 'create' && createMode === 'pool') url.searchParams.set('mode', 'pool')
     window.history.pushState(null, '', `${url.pathname}${url.search}`)
     setPage(nextPage)
-    if (targetPoolId) setPoolId(targetPoolId)
+    if (nextPage === 'activity') { setActivity([]); setActivityCursor(undefined) }
+    if (nextPoolId) setPoolId(nextPoolId)
     setError('')
   }
 
@@ -484,15 +479,25 @@ function App() {
     return page.items
   }, [setPools])
 
-  const refreshActivity = useCallback(async () => {
+  const refreshPoolActivity = useCallback(async () => {
     if (!poolId) return
     const result = await api<CursorPage<ActivityEvent>>(`/v1/pools/${encodeURIComponent(poolId)}/activity?limit=25`)
     setActivity(result.items); setActivityCursor(result.nextCursor)
   }, [poolId, setActivity, setActivityCursor])
 
+  const refreshWalletActivity = useCallback(async () => {
+    if (!address) return
+    const result = await api<CursorPage<ActivityEvent>>(`/v1/activity?payAddress=${encodeURIComponent(address)}&limit=25`)
+    setActivity(result.items); setActivityCursor(result.nextCursor)
+  }, [address, setActivity, setActivityCursor])
+
   async function loadMoreActivity() {
-    if (!poolId || !activityCursor) return
-    const result = await api<CursorPage<ActivityEvent>>(`/v1/pools/${encodeURIComponent(poolId)}/activity?limit=25&cursor=${encodeURIComponent(activityCursor)}`)
+    if (!activityCursor) return
+    const path = page === 'activity'
+      ? address ? `/v1/activity?payAddress=${encodeURIComponent(address)}&limit=25&cursor=${encodeURIComponent(activityCursor)}` : undefined
+      : poolId ? `/v1/pools/${encodeURIComponent(poolId)}/activity?limit=25&cursor=${encodeURIComponent(activityCursor)}` : undefined
+    if (!path) return
+    const result = await api<CursorPage<ActivityEvent>>(path)
     setActivity((current) => [...current, ...result.items]); setActivityCursor(result.nextCursor)
   }
 
@@ -506,7 +511,7 @@ function App() {
       const route = routeFromLocation()
       const params = new URLSearchParams(window.location.search)
       setPage(route.page)
-      const nextPoolId = route.poolId ?? (route.page === 'activity' ? params.get('pool') ?? '' : '')
+      const nextPoolId = route.poolId ?? ''
       if (nextPoolId) setPoolId(nextPoolId)
       if (route.page === 'pools') setPoolSearch(params.get('q') ?? '')
       if (route.page === 'create') setCreateMode(params.get('mode') === 'pool' ? 'pool' : 'asset')
@@ -526,7 +531,7 @@ function App() {
       const route = routeFromLocation()
       const params = new URLSearchParams(window.location.search)
       const linked = params.get('swap') ? page.items.find((item) => item.id === params.get('swap') && item.available) : undefined
-      const requestedPoolId = route.poolId ?? (route.page === 'activity' ? params.get('pool') ?? undefined : undefined)
+      const requestedPoolId = route.poolId
       const routed = requestedPoolId ? page.items.find((item) => item.id === requestedPoolId) : undefined
       const first = linked ?? routed ?? (!requestedPoolId ? page.items.find((p) => p.available && p.protocolFeeBps > 0) ?? page.items.find((p) => p.available) ?? page.items[0] : undefined)
       if (first) {
@@ -623,14 +628,21 @@ function App() {
   }, [liquidityRequest, refreshAssets, refreshPools])
 
   useEffect(() => {
-    if ((page !== 'activity' && page !== 'pool') || !poolId) return
+    if (page !== 'pool' || !poolId) return
     void Promise.all([
       api<CursorPage<ActivityEvent>>(`/v1/pools/${encodeURIComponent(poolId)}/activity?limit=25`).then((result) => { setActivity(result.items); setActivityCursor(result.nextCursor) }),
       api<Pool>(`/v1/pools/${encodeURIComponent(poolId)}`).then((next) => setPools((current) => [...new Map([...current, next].map((item) => [item.id, item])).values()])),
     ]).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)))
-    const timer = window.setInterval(() => void refreshActivity().catch(() => undefined), 15_000)
+    const timer = window.setInterval(() => void refreshPoolActivity().catch(() => undefined), 15_000)
     return () => window.clearInterval(timer)
-  }, [page, poolId, refreshActivity])
+  }, [page, poolId, refreshPoolActivity])
+
+  useEffect(() => {
+    if (page !== 'activity' || !address) return
+    const initial = window.setTimeout(() => void refreshWalletActivity().catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause))), 0)
+    const refresh = window.setInterval(() => void refreshWalletActivity().catch(() => undefined), 15_000)
+    return () => { window.clearTimeout(initial); window.clearInterval(refresh) }
+  }, [page, address, refreshWalletActivity])
 
   async function connect() {
     setError('')
@@ -796,7 +808,7 @@ function App() {
     <div className="app-shell">
       <header>
         <button className="brand" onClick={() => navigate('swap')} aria-label="Inscrib3 app home"><img src="/logo.svg" alt="" /><span>INSCRIB3</span><small>APP</small></button>
-        <nav>{(['swap', 'pools', 'create', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') void refreshPools(); if (item === 'activity') void refreshActivity() }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}</nav>
+        <nav>{(['swap', 'pools', 'create', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') void refreshPools() }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}</nav>
         <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span><button className="wallet-small" onClick={() => void connect()} disabled={busy}>{address ? short(address, 4) : 'Connect wallet'}</button></div>
       </header>
 
@@ -932,7 +944,7 @@ function App() {
                 </article>)}
               </div>
 
-              <div className="activity-section-heading"><div><span className="eyebrow"><i /> LIVE FEED</span><h2>Pool activity</h2><p>Swap, liquidity additions and removals for this pool.</p></div><button className="secondary" onClick={() => void refreshActivity()}>Refresh</button></div>
+              <div className="activity-section-heading"><div><span className="eyebrow"><i /> LIVE FEED</span><h2>Pool activity</h2><p>Swap, liquidity additions and removals for this pool.</p></div><button className="secondary" onClick={() => void refreshPoolActivity()}>Refresh</button></div>
               <div className="activity-panel">
                 <div className="activity-head"><span>Type</span><span>Amount</span><span>Status</span><span>Transaction</span></div>
                 {activity.length === 0 ? <div className="empty-state">No activity for this pool yet.</div> : activity.map((item) => {
@@ -993,26 +1005,27 @@ function App() {
           </div>}
           {error && <div className="notice error create-error"><b>Creation unavailable</b><span>{error}</span></div>}
         </section> : <section className="view-page">
-          <div className="view-heading"><div><span className="eyebrow"><i /> REQUEST HISTORY</span><h1>Activity</h1><p>Swaps, deposits, withdrawals, and their settlement status.</p></div><button className="secondary" onClick={() => void refreshActivity()}>Refresh</button></div>
-          <div className="activity-panel">
+          <div className="view-heading"><div><span className="eyebrow"><i /> WALLET HISTORY</span><h1>My activity</h1><p>All swaps, deposits, and withdrawals made by your connected wallet across the platform.</p></div>{address && <button className="secondary" onClick={() => void refreshWalletActivity()}>Refresh</button>}</div>
+          {!address ? <div className="empty-state">Connect Inscrib3 Wallet to view your activity.<br /><button className="secondary" onClick={() => void connect()}>Connect wallet</button></div> : <div className="activity-panel">
             <div className="activity-head"><span>Type</span><span>Amount</span><span>Status</span><span>Transaction</span></div>
-            {activity.length === 0 ? <div className="empty-state">No activity for this pool yet.</div> : activity.map((item) => {
+            {activity.length === 0 ? <div className="empty-state">No activity for this wallet yet.</div> : activity.map((item) => {
               const isSwap = item.activityType === 'swap'
               const sold = item.activityType === 'swap' && item.sellAssetId ? tokenDetails(item.sellAssetId) : undefined
-              const activityBase = pool ? tokenDetails(pool.baseAssetId) : undefined
-              const activityQuote = pool ? tokenDetails(pool.quoteAssetId) : undefined
+              const activityPool = pools.find((candidate) => candidate.id === item.poolId)
+              const activityBase = activityPool ? tokenDetails(activityPool.baseAssetId) : undefined
+              const activityQuote = activityPool ? tokenDetails(activityPool.quoteAssetId) : undefined
               const amountText = isSwap
                 ? `${displayAmount(item.sellAmount ?? '0', sold?.decimals ?? 0)} ${sold?.ticker ?? 'ASSET'}`
                 : item.activityType === 'deposit'
                   ? `${displayAmount(item.baseAmount, activityBase?.decimals ?? 0)} ${activityBase?.ticker ?? 'BASE'} + ${displayAmount(item.quoteAmount, activityQuote?.decimals ?? 0)} ${activityQuote?.ticker ?? 'QUOTE'}`
-                  : `${displayAmount(item.lpAmount, lpDecimals)} LP`
+                  : `${displayAmount(item.lpAmount, activityBase?.decimals ?? 0)} LP`
               return <div className="activity-row" key={`${item.activityType}-${item.id}`}>
-                <div><span className={`activity-icon ${item.activityType}`}>{item.activityType === 'swap' ? '↔' : item.activityType === 'deposit' ? '+' : '−'}</span><div><b>{item.activityType === 'swap' ? 'Swap' : item.activityType === 'deposit' ? 'Add liquidity' : 'Remove liquidity'}</b><small>{item.createdAt ? new Date(item.createdAt).toLocaleString() : short(item.id)}</small></div></div>
+                <div><span className={`activity-icon ${item.activityType}`}>{item.activityType === 'swap' ? '↔' : item.activityType === 'deposit' ? '+' : '−'}</span><div><b>{item.activityType === 'swap' ? 'Swap' : item.activityType === 'deposit' ? 'Add liquidity' : 'Remove liquidity'}</b><small>{activityPool?.name ?? item.poolId} · {item.createdAt ? new Date(item.createdAt).toLocaleString() : short(item.id)}</small></div></div>
                 <code>{amountText}</code><span className={`status-pill ${item.status}`}>{item.status.replace('-', ' ')}</span>
                 <code title={item.settlementTxid ?? item.fundingTxid ?? ''}>{item.settlementTxid || item.fundingTxid ? short(item.settlementTxid ?? item.fundingTxid!, 7) : '—'}</code>
               </div>
             })}
-          </div>
+          </div>}
           {activityCursor && <button className="secondary load-more" onClick={() => void loadMoreActivity()}>Load more activity</button>}
         </section>}
       </main>
