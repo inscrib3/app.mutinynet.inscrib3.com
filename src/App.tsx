@@ -307,10 +307,7 @@ function App() {
   const selectedCreationAssets = [poolForm.baseAssetId, poolForm.quoteAssetId]
     .filter((id) => id && id !== 'btc').map((id) => assets.find((asset) => asset.assetId === id)).filter((asset): asset is AssetInfo => Boolean(asset))
   const controlledCreationAssets = selectedCreationAssets.filter((asset) => asset.controlAssetId)
-  const tokenIds = [...new Set([
-    ...pools.filter((item) => item.available).flatMap((item) => [item.baseAssetId, item.quoteAssetId]),
-    ...catalogAssets.map((item) => item.assetId),
-  ])]
+  const tokenIds = [...new Set(pools.filter((item) => item.available).flatMap((item) => [item.baseAssetId, item.quoteAssetId]))]
   const modalBuyOptions = tokenIds.filter((candidate) => candidate !== modalSellAssetId
     && pools.some((item) => item.available && [item.baseAssetId, item.quoteAssetId].includes(modalSellAssetId)
       && [item.baseAssetId, item.quoteAssetId].includes(candidate)))
