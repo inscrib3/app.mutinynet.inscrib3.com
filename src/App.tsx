@@ -119,7 +119,7 @@ interface LiquidityRequest extends Omit<SwapRequest, 'fundingSats'> {
   lpAmount: string
 }
 type ActivityEvent = (SwapRequest & { activityType: 'swap' }) | (LiquidityRequest & { activityType: 'deposit' | 'withdraw' })
-interface PointsSummary { identityKey: string; total: string; poolPoints: string; swapPoints: string; rank?: number; participants: number; portableToMainnet: true }
+interface PointsSummary { identityKey: string; total: string; poolPoints: string; swapPoints: string; referralPoints: string; referralCode: string; referredUsers: number; rank?: number; participants: number; portableToMainnet: true }
 interface LeaderboardEntry { rank: number; identityKey: string; address: string; total: string; poolPoints: string; swapPoints: string }
 
 interface IssueAssetResult { arkTxId: string; assetId: string }
@@ -418,6 +418,11 @@ async function restoreFundedPoolCreation(saved: SavedPayment | undefined): Promi
 function App() {
   const initialRoute = routeFromLocation()
   const initialParams = new URLSearchParams(window.location.search)
+  const [referralCode] = useState(() => {
+    const incoming = initialParams.get('ref')?.toLowerCase()
+    if (incoming && /^[a-z0-9]{12}$/.test(incoming)) { window.localStorage.setItem('inscrib3-referral', incoming); return incoming }
+    return window.localStorage.getItem('inscrib3-referral') ?? ''
+  })
   const [page, setPage] = useState<Page>(initialRoute.page)
   const initialSwapMode = initialRoute.page === 'swap' && ['deposit', 'withdraw'].includes(initialParams.get('mode') ?? '') ? initialParams.get('mode') as 'deposit' | 'withdraw' : 'swap'
   const [mode, setMode] = useState<'swap' | 'deposit' | 'withdraw'>(initialSwapMode)
@@ -1024,7 +1029,7 @@ function App() {
       const creation = await api<PoolCreation>('/v1/pools', { method: 'POST', body: JSON.stringify({
         id: poolForm.id, name: poolForm.name, baseAssetId: poolForm.baseAssetId, quoteAssetId: poolForm.quoteAssetId,
         lpAssetId: lp.assetId, lpLedgerAssetId: ledger.assetId, controlAssetId: control.assetId,
-        feeBps, protocolFeeBps, payAddress: address, baseAmount: baseAmount.toString(), quoteAmount: quoteAmount.toString(),
+        feeBps, protocolFeeBps, payAddress: address, baseAmount: baseAmount.toString(), quoteAmount: quoteAmount.toString(), referralCode,
       }) })
       setPoolCreation(creation)
       setCreationStep('4/5 · Fund liquidity, carriers, and creation fee atomically')
@@ -1081,7 +1086,7 @@ function App() {
         ? receiveRaw
         : (BigInt(quote.outputAmount) * BigInt(10_000 - slippage)) / 10_000n
       const intent = await api<SwapRequest>(`/v1/pools/${pool.id}/swaps`, {
-        method: 'POST', body: JSON.stringify({ payAddress: address, sellAssetId, sellAmount: raw.toString(), minOutput: minOutput.toString() }),
+        method: 'POST', body: JSON.stringify({ payAddress: address, sellAssetId, sellAmount: raw.toString(), minOutput: minOutput.toString(), referralCode }),
       })
       setRequest(intent)
       const fundingSats = walletNumber(BigInt(intent.fundingSats), 'swap BTC funding')
@@ -1424,6 +1429,7 @@ function App() {
           <div className="points-dashboard">
             <section className="points-score-card"><span>YOUR SCORE</span><div><b>{points ? comma(points.total) : '—'}</b><em>PTS</em></div><p>{points?.rank ? `Rank #${points.rank} of ${points.participants}` : 'Complete an eligible action to enter the ranking'}</p><small>Mutinynet points will migrate to Mainnet with the same wallet identity.</small><a href="https://docs.inscrib3.com/app/points" target="_blank" rel="noreferrer">Migration details ↗</a></section>
             <section className="points-breakdown"><div><span>POOL CREATION</span><b>{points ? comma(points.poolPoints) : '—'}</b><small>10 points per opened pool</small></div><div><span>SWAPS</span><b>{points ? comma(points.swapPoints) : '—'}</b><small>At least 1 point · scales with protocol fee sats</small></div></section>
+            <section className="referral-card"><div><span>REFERRALS</span><b>{points ? comma(points.referralPoints) : '—'} PTS</b><small>{points?.referredUsers ?? 0} referred wallets · +1 per opened pool or settled swap</small></div>{points && <><code>{`${window.location.origin}/?ref=${points.referralCode}`}</code><div><button onClick={() => window.open(`https://x.com/intent/post?text=${encodeURIComponent(`Try Inscrib3 App on Mutinynet and earn portable points: ${window.location.origin}/?ref=${points.referralCode}`)}`, '_blank', 'noopener,noreferrer')}>Share on X</button><button onClick={() => { void navigator.clipboard.writeText(`${window.location.origin}/?ref=${points.referralCode}`); window.open('https://discord.com/channels/@me', '_blank', 'noopener,noreferrer') }}>Copy for Discord</button></div></>}</section>
             <section className="points-leaderboard"><div className="points-board-head"><span>TOP PLAYERS</span><small>LIVE</small></div>{leaderboard.length ? leaderboard.map((item) => <div className={item.identityKey === points?.identityKey ? 'current' : ''} key={item.identityKey}><i>#{item.rank}</i><code>{short(item.address, 5)}</code><b>{comma(item.total)} PTS</b></div>) : <p>No scores yet.</p>}</section>
           </div>
           <div className="activity-panel">
