@@ -413,7 +413,10 @@ function App() {
   const [referralCode] = useState(() => {
     const incoming = initialParams.get('ref')?.toLowerCase()
     if (incoming && /^[a-z0-9]{12}$/.test(incoming)) { window.localStorage.setItem('inscrib3-referral', incoming); return incoming }
-    return window.localStorage.getItem('inscrib3-referral') ?? ''
+    const stored = window.localStorage.getItem('inscrib3-referral')?.toLowerCase()
+    if (stored && /^[a-z0-9]{12}$/.test(stored)) return stored
+    window.localStorage.removeItem('inscrib3-referral')
+    return ''
   })
   const [page, setPage] = useState<Page>(initialRoute.page)
   const initialSwapMode = initialRoute.page === 'swap' && ['deposit', 'withdraw'].includes(initialParams.get('mode') ?? '') ? initialParams.get('mode') as 'deposit' | 'withdraw' : 'swap'
@@ -1022,7 +1025,8 @@ function App() {
       const creation = await api<PoolCreation>('/v1/pools', { method: 'POST', body: JSON.stringify({
         id: poolForm.id, name: poolForm.name, baseAssetId: poolForm.baseAssetId, quoteAssetId: poolForm.quoteAssetId,
         lpAssetId: lp.assetId, lpLedgerAssetId: ledger.assetId, controlAssetId: control.assetId,
-        feeBps, protocolFeeBps, payAddress: address, baseAmount: baseAmount.toString(), quoteAmount: quoteAmount.toString(), referralCode,
+        feeBps, protocolFeeBps, payAddress: address, baseAmount: baseAmount.toString(), quoteAmount: quoteAmount.toString(),
+        ...(referralCode ? { referralCode } : {}),
       }) })
       setPoolCreation(creation)
       setCreationStep('4/5 · Fund liquidity, carriers, and creation fee atomically')
@@ -1079,7 +1083,8 @@ function App() {
         ? receiveRaw
         : (BigInt(quote.outputAmount) * BigInt(10_000 - slippage)) / 10_000n
       const intent = await api<SwapRequest>(`/v1/pools/${pool.id}/swaps`, {
-        method: 'POST', body: JSON.stringify({ payAddress: address, sellAssetId, sellAmount: raw.toString(), minOutput: minOutput.toString(), referralCode }),
+        method: 'POST', body: JSON.stringify({ payAddress: address, sellAssetId, sellAmount: raw.toString(), minOutput: minOutput.toString(),
+          ...(referralCode ? { referralCode } : {}) }),
       })
       setRequest(intent)
       const fundingSats = walletNumber(BigInt(intent.fundingSats), 'swap BTC funding')
