@@ -116,6 +116,17 @@ interface PointsSummary { identityKey: string; total: string; poolPoints: string
 interface LeaderboardEntry { rank: number; identityKey: string; address: string; total: string; poolPoints: string; swapPoints: string }
 
 interface IssueAssetResult { arkTxId: string; assetId: string }
+interface IssueAssetInput {
+  amount: number
+  controlAssetId?: string
+  metadata?: { name?: string; ticker?: string; decimals?: number; icon?: string }
+}
+interface PoolAssetIssuance {
+  key: string
+  control: IssueAssetResult
+  lp?: IssueAssetResult
+  ledger?: IssueAssetResult
+}
 interface PoolCreation {
   id: string
   pool: Pool
@@ -164,7 +175,7 @@ interface ArkadeProvider {
   getAssets(): Promise<AssetInfo[]>
   sendToAddress(address: string, amount: number): Promise<string>
   sendAsset(address: string, assets: Array<{ assetId: string; amount: number }>, bitcoinAmount?: number): Promise<string>
-  issueAsset(input: { amount: number; controlAssetId?: string; metadata?: { name?: string; ticker?: string; decimals?: number; icon?: string } }): Promise<IssueAssetResult>
+  issueAsset(input: IssueAssetInput): Promise<IssueAssetResult>
   // Planned wallet method (arkade_switchNetwork); older wallets don't have it.
   switchNetwork?(network: string): Promise<void>
   on(event: string, callback: () => void): void
@@ -202,6 +213,24 @@ function assertProviderAmounts(assets: AssetInfo[], balance: BalanceInfo): void 
 async function assertWalletNetwork(provider: ArkadeProvider): Promise<void> {
   const current = await provider.getNetwork()
   if (current.network !== WALLET_NETWORK) throw new Error(`Switch Inscrib3 Wallet to ${NETWORK_LABEL} before continuing.`)
+}
+
+function isSpentVtxoError(cause: unknown): boolean {
+  const message = cause instanceof Error ? cause.message : String(cause)
+  return /VTXO_ALREADY_SPENT|VTXO[^\n]*already spent/i.test(message)
+}
+
+async function issueAssetWithRetry(provider: ArkadeProvider, input: IssueAssetInput, onRetry: () => void): Promise<IssueAssetResult> {
+  try { return await provider.issueAsset(input) }
+  catch (cause) {
+    if (!isSpentVtxoError(cause)) throw cause
+    onRetry()
+    // Consecutive issuances can briefly select the VTXO consumed by the
+    // previous one. After the rejection, let the wallet/indexer refresh and
+    // request approval again with fresh coin selection.
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 750))
+    return provider.issueAsset(input)
+  }
 }
 
 function displayAmount(value: string | bigint, decimals: number, precision = 6): string {
@@ -460,6 +489,7 @@ function App() {
   const [issuedAsset, setIssuedAsset] = useState<IssueAssetResult | null>(null)
   const [poolForm, setPoolForm] = useState(DEFAULT_POOL_FORM)
   const [poolCreation, setPoolCreation] = useState<PoolCreation | null>(null)
+  const [poolAssetIssuance, setPoolAssetIssuance] = useState<PoolAssetIssuance | null>(null)
   const [creationStep, setCreationStep] = useState('')
   const [deployment, setDeployment] = useState<DeploymentInfo | null>(null)
   const [paymentsRestored, setPaymentsRestored] = useState(false)
@@ -1015,12 +1045,32 @@ function App() {
         && [candidate.baseAssetId, candidate.quoteAssetId].includes(poolForm.quoteAssetId))
       if (duplicate) throw new Error(`A pool already exists for this pair (${duplicate.name}).`)
       const stem = poolForm.name.toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 9) || 'POOL'
-      setCreationStep('1/5 · Issue the pool control asset')
-      const control = await window.arkade.issueAsset({ amount: 1, metadata: { ticker: `${stem}-CTRL`.slice(0, 16), decimals: 0 } })
-      setCreationStep('2/5 · Issue LP tokens')
-      const lp = await window.arkade.issueAsset({ amount: safeBase, controlAssetId: control.assetId, metadata: { ticker: `${stem}-LP`.slice(0, 16), decimals: baseDecimals } })
-      setCreationStep('3/5 · Issue the covenant ledger asset')
-      const ledger = await window.arkade.issueAsset({ amount: safeBase, controlAssetId: control.assetId, metadata: { ticker: `${stem}-LEDGER`.slice(0, 16), decimals: 0 } })
+      const issuanceKey = JSON.stringify([WALLET_NETWORK, address, poolForm.id, stem, baseAmount.toString(), baseDecimals])
+      let issued = poolAssetIssuance?.key === issuanceKey ? poolAssetIssuance : null
+      let control = issued?.control
+      if (!control) {
+        setCreationStep('1/5 · Issue the pool control asset')
+        control = await issueAssetWithRetry(window.arkade, { amount: 1, metadata: { ticker: `${stem}-CTRL`.slice(0, 16), decimals: 0 } },
+          () => setCreationStep('1/5 · Refresh wallet state and retry control asset'))
+        issued = { key: issuanceKey, control }
+        setPoolAssetIssuance(issued)
+      }
+      let lp = issued?.lp
+      if (!lp) {
+        setCreationStep('2/5 · Issue LP tokens')
+        lp = await issueAssetWithRetry(window.arkade, { amount: safeBase, controlAssetId: control.assetId, metadata: { ticker: `${stem}-LP`.slice(0, 16), decimals: baseDecimals } },
+          () => setCreationStep('2/5 · Refresh wallet state and retry LP tokens'))
+        issued = { ...issued!, lp }
+        setPoolAssetIssuance(issued)
+      }
+      let ledger = issued?.ledger
+      if (!ledger) {
+        setCreationStep('3/5 · Issue the covenant ledger asset')
+        ledger = await issueAssetWithRetry(window.arkade, { amount: safeBase, controlAssetId: control.assetId, metadata: { ticker: `${stem}-LEDGER`.slice(0, 16), decimals: 0 } },
+          () => setCreationStep('3/5 · Refresh wallet state and retry ledger asset'))
+        issued = { ...issued!, ledger }
+        setPoolAssetIssuance(issued)
+      }
       setCreationStep('4/5 · Register the atomic bootstrap')
       const creation = await api<PoolCreation>('/v1/pools', { method: 'POST', body: JSON.stringify({
         id: poolForm.id, name: poolForm.name, baseAssetId: poolForm.baseAssetId, quoteAssetId: poolForm.quoteAssetId,
@@ -1046,7 +1096,7 @@ function App() {
   async function openFundedPool(creation: PoolCreation, fundingTxid: string) {
     setCreationStep('5/5 · Open the covenant pool')
     const opened = await api<PoolCreation>(`/v1/pool-creations/${encodeURIComponent(creation.id)}/open`, { method: 'POST', body: JSON.stringify({ fundingTxid }) })
-    setPoolCreation(opened); setCreationStep('Pool opened'); setPoolForm(DEFAULT_POOL_FORM)
+    setPoolCreation(opened); setCreationStep('Pool opened'); setPoolForm(DEFAULT_POOL_FORM); setPoolAssetIssuance(null)
     await Promise.all([refreshAssets(), refreshPools(), refreshPoints()])
   }
 
@@ -1413,7 +1463,7 @@ function App() {
                 <div><span>Stable Treasury Vault</span><code title={deployment?.platformTreasuryAddress}>{deployment ? short(deployment.platformTreasuryAddress, 8) : 'Unavailable'}</code></div>
               </div>
               {controlledCreationAssets.length > 0 && <div className="notice asset-risk"><b>Reissuable asset warning</b><span>{controlledCreationAssets.map((asset) => `${asset.metadata?.ticker ?? short(asset.assetId)} · control ${short(asset.controlAssetId!, 8)}`).join(' · ')}. Additional supply may be issued by the control holder.</span></div>}
-              <button className="primary" disabled={busy || connecting || (walletReady && poolFormBlocker !== null)} onClick={() => void createPool()}>{busy && <Spinner />}{walletActionLabel ?? poolFormBlocker ?? 'Issue pool assets & open pool'}</button>
+              <button className="primary" disabled={busy || connecting || (walletReady && poolFormBlocker !== null)} onClick={() => void createPool()}>{busy && <Spinner />}{walletActionLabel ?? poolFormBlocker ?? (poolAssetIssuance ? 'Resume pool creation' : 'Issue pool assets & open pool')}</button>
               {creationStep && <div className="creation-progress"><i className={poolCreation?.status === 'opened' ? 'done' : ''} /><span>{creationStep}</span></div>}
               {poolOpeningPending && <button className="secondary" disabled={busy} onClick={() => void retryPoolOpening()}>Retry opening</button>}
               {poolCreation && <div className="result-box"><span>Status</span><b>{poolCreation.status}</b>{poolCreation.status === 'opened' && <><span>Points earned</span><b className="points-earned">+10 PTS</b></>}<span>Bootstrap covenant</span><code>{poolCreation.bootstrapAddress}</code>{poolCreation.openingTxid && <><span>Opening transaction</span><code>{poolCreation.openingTxid}</code></>}</div>}
