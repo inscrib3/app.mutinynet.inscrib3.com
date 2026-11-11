@@ -1,12 +1,20 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
+import { firstFormError, MAX_WALLET_AMOUNT, MIN_PROTOCOL_FEE_BPS, parseDisplayAmount, rawAmount, validateAssetForm, validatePoolForm, type AssetFormInput, type PoolFormInput } from './form-validation'
+import { describeWalletError, errorMessage, LOCKED_WALLET, MISSING_WALLET, WALLET_INSTALL_URL, type WalletIssue } from './wallet-issues'
 
 const API = import.meta.env.VITE_API_URL ?? '/api'
 const NETWORK = import.meta.env.VITE_NETWORK ?? 'mutinynet'
 if (NETWORK !== 'mutinynet' && NETWORK !== 'mainnet') throw new Error('VITE_NETWORK must be mutinynet or mainnet')
 const NETWORK_LABEL = NETWORK === 'mainnet' ? 'MAINNET' : 'MUTINYNET'
 const WALLET_NETWORK = NETWORK === 'mainnet' ? 'bitcoin' : 'mutinynet'
-const MAX_WALLET_AMOUNT = 9_007_199_254_740_991n
+const APP_NETWORK_NAME = NETWORK === 'mainnet' ? 'Mainnet' : 'Mutinynet (testnet)'
+const SWITCH_NETWORK_LABEL = NETWORK === 'mainnet' ? 'Switch to Mainnet' : 'Switch to testnet'
+const OPEN_REQUEST_STATUSES: ReadonlyArray<SwapRequest['status']> = ['pending-funding', 'funded', 'sweeping']
+const EMPTY_ASSET_FORM = { name: '', ticker: '', supply: '', decimals: '0', icon: '' }
+const ASSET_FIELD_LABELS: Record<keyof AssetFormInput, string> = { name: 'Name', ticker: 'Ticker', supply: 'Initial supply', decimals: 'Decimals', icon: 'Icon URL' }
+const POOL_FIELD_LABELS: Partial<Record<keyof PoolFormInput, string>> = { quoteAssetId: 'Quote asset', baseAmount: 'Initial base reserve', quoteAmount: 'Initial quote reserve', feeBps: 'Total fee', protocolFeeBps: 'Protocol fee' }
+const DEFAULT_POOL_FORM ={ id: '', name: '', baseAssetId: 'btc', quoteAssetId: '', baseAmount: '', quoteAmount: '', feeBps: '100', protocolFeeBps: String(MIN_PROTOCOL_FEE_BPS) }
 const DOCS_URL = 'https://docs.inscrib3.com/app/overview'
 const SOURCE_URL = 'https://github.com/inscrib3/app.mutinynet.inscrib3.com'
 
@@ -162,6 +170,8 @@ interface ArkadeProvider {
   sendToAddress(address: string, amount: number): Promise<string>
   sendAsset(address: string, assets: Array<{ assetId: string; amount: number }>, bitcoinAmount?: number): Promise<string>
   issueAsset(input: { amount: number; controlAssetId?: string; metadata?: { name?: string; ticker?: string; decimals?: number; icon?: string } }): Promise<IssueAssetResult>
+  // Planned wallet method (arkade_switchNetwork); older wallets don't have it.
+  switchNetwork?(network: string): Promise<void>
   on(event: string, callback: () => void): void
   off(event: string, callback: () => void): void
 }
@@ -195,15 +205,6 @@ function assertProviderAmounts(assets: AssetInfo[], balance: BalanceInfo): void 
 async function assertWalletNetwork(provider: ArkadeProvider): Promise<void> {
   const current = await provider.getNetwork()
   if (current.network !== WALLET_NETWORK) throw new Error(`Switch Inscrib3 Wallet to ${NETWORK_LABEL} before continuing.`)
-}
-
-function rawAmount(value: string, decimals: number): bigint | null {
-  if (!/^\d*(\.\d*)?$/.test(value) || value === '' || value === '.') return null
-  const [whole = '0', fraction = ''] = value.split('.')
-  if (fraction.length > decimals) return null
-  const raw = `${whole || '0'}${fraction.padEnd(decimals, '0')}`.replace(/^0+(?=\d)/, '')
-  const amount = BigInt(raw || '0')
-  return amount > 0n ? amount : null
 }
 
 function displayAmount(value: string | bigint, decimals: number, precision = 6): string {
@@ -348,6 +349,33 @@ function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals
   </section>
 }
 
+// Empty fields stay quiet; the submit button already says what is missing.
+function FieldError({ message, value }: { message?: string; value: string }) {
+  if (!message || value.trim() === '') return null
+  return <span className="field-error" role="alert">{message}</span>
+}
+
+interface RequestProgress { status: SwapRequest['status']; settlementTxid?: string; error?: string }
+
+function describeRequest(noun: string, request: RequestProgress): { title: string; detail: string } {
+  switch (request.status) {
+    case 'settled': return { title: `${noun} complete`, detail: `Settlement ${short(request.settlementTxid ?? '')}` }
+    case 'failed': return { title: `${noun} failed`, detail: request.error ?? 'The request could not be completed.' }
+    case 'refunded': return { title: `${noun} refunded`, detail: `Refund ${short(request.settlementTxid ?? '')}. Your funds are back, so you can retry.` }
+    case 'funded':
+    case 'sweeping': return { title: `${noun} funded`, detail: 'Waiting for the next pool sweep…' }
+    case 'pending-funding': return { title: `${noun} created`, detail: 'Waiting for the wallet payment…' }
+  }
+}
+
+function RequestNotice({ noun, request, onDismiss }: { noun: string; request: RequestProgress; onDismiss: () => void }) {
+  const { title, detail } = describeRequest(noun, request)
+  return <div className={`notice status ${request.status}`}>
+    <b>{title}</b><span>{detail}</span>
+    {request.status === 'failed' ? <button type="button" className="notice-dismiss" onClick={onDismiss}>Dismiss</button> : <i />}
+  </div>
+}
+
 function App() {
   const initialRoute = routeFromLocation()
   const initialParams = new URLSearchParams(window.location.search)
@@ -377,6 +405,10 @@ function App() {
   const [slippage, setSlippage] = useState(50)
   const [showSettings, setShowSettings] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [connecting, setConnecting] = useState(false)
+  const [walletIssue, setWalletIssue] = useState<WalletIssue | null>(null)
+  const [walletNetwork, setWalletNetwork] = useState<NetworkInfo | null>(null)
+  const [showSwitchSteps, setShowSwitchSteps] = useState(false)
   const [error, setError] = useState('')
   const [toast, setToast] = useState('')
   const [request, setRequest] = useState<SwapRequest | null>(null)
@@ -385,9 +417,9 @@ function App() {
   const [activity, setActivity] = useState<ActivityEvent[]>([])
   const [activityCursor, setActivityCursor] = useState<string | undefined>()
   const [createMode, setCreateMode] = useState<'asset' | 'pool'>(initialRoute.page === 'create' && initialParams.get('mode') === 'pool' ? 'pool' : 'asset')
-  const [assetForm, setAssetForm] = useState({ name: '', ticker: '', supply: '', decimals: '0', icon: '' })
+  const [assetForm, setAssetForm] = useState(EMPTY_ASSET_FORM)
   const [issuedAsset, setIssuedAsset] = useState<IssueAssetResult | null>(null)
-  const [poolForm, setPoolForm] = useState({ id: '', name: '', baseAssetId: 'btc', quoteAssetId: '', baseAmount: '', quoteAmount: '', feeBps: '100', protocolFeeBps: '30' })
+  const [poolForm, setPoolForm] = useState(DEFAULT_POOL_FORM)
   const [poolCreation, setPoolCreation] = useState<PoolCreation | null>(null)
   const [creationStep, setCreationStep] = useState('')
   const [deployment, setDeployment] = useState<DeploymentInfo | null>(null)
@@ -406,6 +438,11 @@ function App() {
   const buyTicker = !buyAssetId ? 'SELECT' : buyAssetId === 'btc' ? 'BTC' : buyPoolInfo?.metadata?.ticker ?? buyAsset?.metadata?.ticker ?? (pool?.name.split('/')[buyAssetId === pool?.quoteAssetId ? 1 : 0]?.trim() || 'ASSET')
   const raw = rawAmount(amount, sellDecimals)
   const receiveRaw = rawAmount(receiveAmount, buyDecimals)
+  const sellAmountCheck = parseDisplayAmount(amount, sellDecimals)
+  const walletOnWrongNetwork = walletNetwork !== null && walletNetwork.network !== WALLET_NETWORK
+  const walletReady = Boolean(address) && !walletOnWrongNetwork
+  const swapLocked = request !== null && (OPEN_REQUEST_STATUSES.includes(request.status) || request.status === 'failed')
+  const liquidityLocked = liquidityRequest !== null && (OPEN_REQUEST_STATUSES.includes(liquidityRequest.status) || liquidityRequest.status === 'failed')
   const baseAsset = assets.find((asset) => asset.assetId === pool?.baseAssetId)
   const quoteAsset = assets.find((asset) => asset.assetId === pool?.quoteAssetId)
   const lpAsset = assets.find((asset) => asset.assetId === pool?.lpAssetId)
@@ -443,6 +480,11 @@ function App() {
     return { ticker, decimals, name: assetId === 'btc' ? 'Native Bitcoin' : poolInfo?.metadata?.name ?? walletAsset?.metadata?.name ?? catalogAsset?.metadata?.name ?? short(assetId, 10), controlled: poolInfo?.controlAssetId ?? walletAsset?.controlAssetId ?? catalogAsset?.controlAssetId }
   }
 
+  function walletBalance(assetId: string): bigint {
+    if (assetId === 'btc') return BigInt(btcBalance)
+    return BigInt(assets.find((item) => item.assetId === assetId)?.amount ?? 0)
+  }
+
   function updatePoolPair(baseAssetId: string, quoteAssetId: string) {
     const baseTicker = baseAssetId ? tokenDetails(baseAssetId).ticker : ''
     const quoteTicker = quoteAssetId ? tokenDetails(quoteAssetId).ticker : ''
@@ -455,6 +497,15 @@ function App() {
   const creationQuoteDetails = poolForm.quoteAssetId ? tokenDetails(poolForm.quoteAssetId) : undefined
   const creationBaseAmount = creationBaseDetails ? rawAmount(poolForm.baseAmount, creationBaseDetails.decimals) : null
   const creationQuoteAmount = creationQuoteDetails ? rawAmount(poolForm.quoteAmount, creationQuoteDetails.decimals) : null
+  const existingPair = poolForm.quoteAssetId ? pools.find((item) => [item.baseAssetId, item.quoteAssetId].includes(poolForm.baseAssetId)
+    && [item.baseAssetId, item.quoteAssetId].includes(poolForm.quoteAssetId)) : undefined
+  const poolValidation = validatePoolForm(poolForm, {
+    base: creationBaseDetails && { ticker: creationBaseDetails.ticker, decimals: creationBaseDetails.decimals, balance: walletBalance(poolForm.baseAssetId) },
+    quote: creationQuoteDetails && { ticker: creationQuoteDetails.ticker, decimals: creationQuoteDetails.decimals, balance: walletBalance(poolForm.quoteAssetId) },
+    creationFeeSats: BigInt(deployment?.poolCreationFeeSats ?? '0'),
+    existingPairName: existingPair?.name,
+  })
+  const assetValidation = validateAssetForm(assetForm)
   const initialLiquiditySummary = creationBaseAmount && creationQuoteAmount && creationBaseDetails && creationQuoteDetails
     ? `${displayAmount(creationBaseAmount, creationBaseDetails.decimals, 8)} ${creationBaseDetails.ticker} + ${displayAmount(creationQuoteAmount, creationQuoteDetails.decimals, 8)} ${creationQuoteDetails.ticker}`
     : 'Enter both reserves'
@@ -537,7 +588,8 @@ function App() {
   }
 
   function updateSwapMode(nextMode: 'swap' | 'deposit' | 'withdraw') {
-    setMode(nextMode); setError(''); setLiquidityAmount(''); setLiquidityRequest(null)
+    setMode(nextMode); setError('')
+    if (!liquidityLocked) { setLiquidityAmount(''); setLiquidityRequest(null) }
     const url = new URL(window.location.href)
     url.pathname = '/'
     if (poolId) url.searchParams.set('swap', poolId)
@@ -573,20 +625,31 @@ function App() {
     try {
       const page = await api<PageResult<Pool>>(`/v1/pools?assetId=${encodeURIComponent(assetId)}&limit=100`)
       setPools((current) => [...new Map([...current, ...page.items].map((item) => [item.id, item])).values()])
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    } catch (cause) { setError(errorMessage(cause)) }
   }
 
   function applyPair() {
     const next = bestPoolForPair(modalSellAssetId, modalBuyAssetId)
     if (!next) return
     replaceSwapUrl(next, modalSellAssetId)
-    setPoolId(next.id); setSellAssetId(modalSellAssetId); setAmount(''); setReceiveAmount(''); setQuote(null); setRequest(null); setError(''); setShowPairModal(false)
+    setPoolId(next.id); setSellAssetId(modalSellAssetId); setAmount(''); setReceiveAmount(''); setQuote(null); setError(''); setShowPairModal(false)
+    clearFinishedRequests()
   }
 
-  function switchToPool(target: Pool) {
-    replaceSwapUrl(target, target.baseAssetId)
-    setPoolId(target.id); setSellAssetId(target.baseAssetId); setMode('swap')
-    setAmount(''); setReceiveAmount(''); setQuote(null); setRequest(null); setLiquidityRequest(null); setError('')
+  function switchToPool(target: Pool, history: 'replace' | 'push' = 'replace') {
+    const url = swapUrl(target, target.baseAssetId)
+    if (history === 'push') window.history.pushState(null, '', url)
+    else window.history.replaceState(null, '', url)
+    setLinkCopied(false)
+    setPoolId(target.id); setSellAssetId(target.baseAssetId); setMode('swap'); setPage('swap')
+    setAmount(''); setReceiveAmount(''); setQuote(null); setError('')
+    clearFinishedRequests()
+  }
+
+  // An open request keeps its status and lock: dropping it would let the user pay twice.
+  function clearFinishedRequests() {
+    if (!swapLocked) setRequest(null)
+    if (!liquidityLocked) setLiquidityRequest(null)
   }
 
   function setMaxAmount() {
@@ -596,11 +659,28 @@ function App() {
   }
 
   const refreshAssets = useCallback(async () => {
-    if (!window.arkade || !address) return
+    if (!window.arkade || !address || walletOnWrongNetwork) return
     const [nextAssets, nextBalance] = await Promise.all([window.arkade.getAssets(), window.arkade.getBalance()])
     assertProviderAmounts(nextAssets, nextBalance)
     setAssets(nextAssets); setBtcBalance(nextBalance.available)
-  }, [address, setAssets, setBtcBalance])
+  }, [address, walletOnWrongNetwork, setAssets, setBtcBalance])
+
+  const loadWallet = useCallback(async (provider: ArkadeProvider, knownAddress?: string) => {
+    const network = await provider.getNetwork()
+    const nextAddress = knownAddress ?? await provider.getAddress()
+    setWalletNetwork(network); setAddress(nextAddress); setWalletIssue(null); setShowSwitchSteps(false)
+    if (network.network !== WALLET_NETWORK) { setAssets([]); setBtcBalance(0); return }
+    const [nextAssets, nextBalance] = await Promise.all([provider.getAssets(), provider.getBalance()])
+    assertProviderAmounts(nextAssets, nextBalance)
+    setAssets(nextAssets); setBtcBalance(nextBalance.available)
+  }, [])
+
+  // A locked wallet gets a banner that waits for the unlock; other failures are one-off toasts.
+  const showWalletError = useCallback((cause: unknown) => {
+    const issue = describeWalletError(cause)
+    if (issue.kind === 'locked') setWalletIssue(issue)
+    else setToast(`${issue.title}. ${issue.detail}`)
+  }, [])
 
   const refreshPools = useCallback(async () => {
     const page = await api<PageResult<Pool>>('/v1/pools?limit=100')
@@ -678,7 +758,7 @@ function App() {
         if (linked && params.get('output')) { setReceiveAmount(params.get('output')!); setQuoteMode('output') }
         else if (linked && params.get('amount')) setAmount(params.get('amount')!)
       }
-    }).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)))
+    }).catch((cause: unknown) => setError(errorMessage(cause)))
   }, [])
 
   useEffect(() => {
@@ -689,7 +769,7 @@ function App() {
       if (poolSearch.trim()) query.set('q', poolSearch.trim())
       api<PageResult<Pool>>(`/v1/pools?${query}`, { signal: controller.signal }).then((result) => {
         setPoolResults(result.items); setPoolResultTotal(result.total); setPoolCursor(result.nextCursor)
-      }).catch((cause: unknown) => { if ((cause as Error).name !== 'AbortError') setError(cause instanceof Error ? cause.message : String(cause)) })
+      }).catch((cause: unknown) => { if ((cause as Error).name !== 'AbortError') setError(errorMessage(cause)) })
     }, 250)
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [page, poolSearch])
@@ -701,10 +781,15 @@ function App() {
       const query = new URLSearchParams({ limit: '100' })
       if (tokenSearch.trim()) query.set('q', tokenSearch.trim())
       api<PageResult<CatalogAsset>>(`/v1/assets?${query}`, { signal: controller.signal }).then((result) => setCatalogAssets(result.items))
-        .catch((cause: unknown) => { if ((cause as Error).name !== 'AbortError') setError(cause instanceof Error ? cause.message : String(cause)) })
+        .catch((cause: unknown) => { if ((cause as Error).name !== 'AbortError') setError(errorMessage(cause)) })
     }, 200)
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [showPairModal, tokenSearch])
+
+  // For list buttons on pages without an inline error area: a failure shows as a toast.
+  function runWithToast(task: () => Promise<unknown>) {
+    void task().catch((cause: unknown) => setToast(errorMessage(cause)))
+  }
 
   async function loadMorePools() {
     if (!poolCursor) return
@@ -716,14 +801,24 @@ function App() {
 
   useEffect(() => {
     const provider = window.arkade
-    if (!provider) return
-    const refresh = () => void assertWalletNetwork(provider).then(refreshAssets).catch((cause: unknown) => {
-      setAddress(''); setAssets([]); setBtcBalance(0); setError(cause instanceof Error ? cause.message : String(cause))
-    })
-    provider.on('accountChanged', refresh)
-    provider.on('networkChanged', refresh)
-    return () => { provider.off('accountChanged', refresh); provider.off('networkChanged', refresh) }
-  }, [refreshAssets])
+    if (!provider || !address) return
+    const sync = () => void loadWallet(provider).catch(showWalletError)
+    provider.on('accountChanged', sync)
+    provider.on('networkChanged', sync)
+    return () => { provider.off('accountChanged', sync); provider.off('networkChanged', sync) }
+  }, [address, loadWallet, showWalletError])
+
+  // The unlock listener must call the current connect(), not the one from the render that subscribed.
+  const latestConnect = useRef(connect)
+  useEffect(() => { latestConnect.current = connect })
+  const waitingForUnlock = walletIssue?.kind === 'locked'
+  useEffect(() => {
+    const provider = window.arkade
+    if (!provider || !waitingForUnlock) return
+    const resume = () => void latestConnect.current()
+    provider.on('unlock', resume)
+    return () => provider.off('unlock', resume)
+  }, [waitingForUnlock])
 
   useEffect(() => {
     if (!toast) return
@@ -751,7 +846,7 @@ function App() {
           setQuote(next)
           if (quoteMode === 'input') setReceiveAmount(editableAmount(next.outputAmount, buyDecimals))
           else if (next.inputAmount) setAmount(editableAmount(next.inputAmount, sellDecimals))
-        }).catch((cause: unknown) => { if ((cause as Error).name !== 'AbortError') setError(cause instanceof Error ? cause.message : String(cause)) })
+        }).catch((cause: unknown) => { if ((cause as Error).name !== 'AbortError') setError(errorMessage(cause)) })
     }, 300)
     return () => { window.clearTimeout(timer); controller.abort() }
   }, [pool, quoteRequestAmount, quoteMode, sellAssetId, buyAssetId, sellDecimals, buyDecimals])
@@ -761,7 +856,8 @@ function App() {
     const timer = window.setInterval(() => {
       api<SwapRequest>(`/v1/swaps/${request.id}`).then((next) => {
         setRequest(next)
-        if (next.status === 'settled') { void refreshAssets(); void refreshPools(); void refreshPoints() }
+        if (next.status === 'settled') { setAmount(''); setReceiveAmount(''); setQuote(null); setQuoteMode('input') }
+        if (next.status === 'settled' || next.status === 'refunded') { void refreshAssets(); void refreshPools(); void refreshPoints() }
       }).catch(() => undefined)
     }, 2500)
     return () => window.clearInterval(timer)
@@ -772,7 +868,8 @@ function App() {
     const timer = window.setInterval(() => {
       api<LiquidityRequest>(`/v1/liquidity/${liquidityRequest.id}`).then((next) => {
         setLiquidityRequest(next)
-        if (next.status === 'settled') { void refreshAssets(); void refreshPools() }
+        if (next.status === 'settled') setLiquidityAmount('')
+        if (next.status === 'settled' || next.status === 'refunded') { void refreshAssets(); void refreshPools() }
       }).catch(() => undefined)
     }, 2500)
     return () => window.clearInterval(timer)
@@ -783,77 +880,70 @@ function App() {
     void Promise.all([
       api<CursorPage<ActivityEvent>>(`/v1/pools/${encodeURIComponent(poolId)}/activity?limit=25`).then((result) => { setActivity(result.items); setActivityCursor(result.nextCursor) }),
       api<Pool>(`/v1/pools/${encodeURIComponent(poolId)}`).then((next) => setPools((current) => [...new Map([...current, next].map((item) => [item.id, item])).values()])),
-    ]).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)))
+    ]).catch((cause: unknown) => setError(errorMessage(cause)))
     const timer = window.setInterval(() => void refreshPoolActivity().catch(() => undefined), 15_000)
     return () => window.clearInterval(timer)
   }, [page, poolId, refreshPoolActivity])
 
   useEffect(() => {
     if (page !== 'activity' || !address) return
-    const initial = window.setTimeout(() => void refreshWalletActivity().catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause))), 0)
+    const initial = window.setTimeout(() => void refreshWalletActivity().catch((cause: unknown) => setError(errorMessage(cause))), 0)
     const refresh = window.setInterval(() => void refreshWalletActivity().catch(() => undefined), 15_000)
     return () => { window.clearTimeout(initial); window.clearInterval(refresh) }
   }, [page, address, refreshWalletActivity])
 
   async function connect() {
-    setError('')
-    if (!window.arkade) {
-      const message = 'Inscrib3 Wallet extension was not found.'
-      setError(message); setToast(message); return
-    }
-    setBusy(true)
+    const provider = window.arkade
+    if (!provider) { setWalletIssue(MISSING_WALLET); return }
+    setConnecting(true); setWalletIssue(null)
     try {
-      const state = await window.arkade.getProviderState?.()
-      if (state && !state.isUnlocked) throw new Error('Inscrib3 Wallet is locked. Open the extension, enter your password, then click Connect wallet again.')
-      const [connected] = await window.arkade.connect()
-      await assertWalletNetwork(window.arkade)
-      const nextAddress = connected ?? await window.arkade.getAddress()
+      // The wallet reports isUnlocked: false for every site it hasn't connected yet,
+      // so this only proves "locked" for an already-connected site.
+      const state = await provider.getProviderState?.()
+      if (state?.isConnected && !state.isUnlocked) { setWalletIssue(LOCKED_WALLET); return }
+      const [connected] = await provider.connect()
       setPoints(null); setLeaderboard([])
-      setAddress(nextAddress)
-      const [nextAssets, nextBalance] = await Promise.all([window.arkade.getAssets(), window.arkade.getBalance()])
-      assertProviderAmounts(nextAssets, nextBalance)
-      setAssets(nextAssets); setBtcBalance(nextBalance.available)
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : String(cause)
-      setError(message); setToast(message)
-    }
-    finally { setBusy(false) }
+      await loadWallet(provider, connected)
+    } catch (cause) { showWalletError(cause) }
+    finally { setConnecting(false) }
+  }
+
+  async function switchWalletNetwork() {
+    const provider = window.arkade
+    if (!provider?.switchNetwork) { setShowSwitchSteps(true); return }
+    try { await provider.switchNetwork(WALLET_NETWORK) } catch (cause) { showWalletError(cause) }
+  }
+
+  function requireWallet() {
+    return address ? switchWalletNetwork() : connect()
   }
 
   async function createAsset() {
-    if (!address) return connect()
-    if (!window.arkade) return
-    const decimals = Number(assetForm.decimals)
-    if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) { setError('Decimals must be between 0 and 18.'); return }
-    const supply = rawAmount(assetForm.supply, decimals)
-    if (!supply || !assetForm.name.trim() || !assetForm.ticker.trim()) { setError('Name, ticker, and a positive supply are required.'); return }
+    if (!walletReady) return requireWallet()
+    const valid = assetValidation.valid
+    if (!window.arkade || !valid) return
     setBusy(true); setError(''); setIssuedAsset(null); setCreationStep('Approve asset issuance in Inscrib3 Wallet')
     try {
       await assertWalletNetwork(window.arkade)
       const result = await window.arkade.issueAsset({
-        amount: walletNumber(supply, 'asset supply'),
-        metadata: { name: assetForm.name.trim(), ticker: assetForm.ticker.trim(), decimals, ...(assetForm.icon.trim() ? { icon: assetForm.icon.trim() } : {}) },
+        amount: walletNumber(valid.supply, 'asset supply'),
+        metadata: { name: valid.name, ticker: valid.ticker, decimals: valid.decimals, ...(valid.icon ? { icon: valid.icon } : {}) },
       })
-      setIssuedAsset(result); setCreationStep('Asset created'); await refreshAssets()
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setCreationStep('') }
+      setIssuedAsset(result); setCreationStep('Asset created'); setAssetForm(EMPTY_ASSET_FORM); await refreshAssets()
+    } catch (cause) { setError(errorMessage(cause)); setCreationStep('') }
     finally { setBusy(false) }
   }
 
   async function createPool() {
-    if (!address) return connect()
+    if (!walletReady) return requireWallet()
     if (!window.arkade || !deployment) { if (!deployment) setError('Deployment configuration is not available.'); return }
-    const baseInfo = poolForm.baseAssetId === 'btc' ? undefined : assets.find((item) => item.assetId === poolForm.baseAssetId)
-    const quoteInfo = assets.find((item) => item.assetId === poolForm.quoteAssetId)
-    const baseDecimals = poolForm.baseAssetId === 'btc' ? 8 : baseInfo?.metadata?.decimals ?? 0
-    const quoteDecimals = quoteInfo?.metadata?.decimals ?? 0
-    const baseAmount = rawAmount(poolForm.baseAmount, baseDecimals)
-    const quoteAmount = rawAmount(poolForm.quoteAmount, quoteDecimals)
-    if (!baseAmount || !quoteAmount || !poolForm.id || !poolForm.name || !poolForm.quoteAssetId) { setError('Complete the pool identity, pair, and initial reserves.'); return }
-    if (poolForm.baseAssetId === poolForm.quoteAssetId || poolForm.quoteAssetId === 'btc') { setError('The assets must differ and native BTC must remain on the base side.'); return }
-    const feeBps = Number(poolForm.feeBps); const protocolFeeBps = Number(poolForm.protocolFeeBps)
-    if (!Number.isInteger(feeBps) || !Number.isInteger(protocolFeeBps) || protocolFeeBps < 30 || feeBps <= protocolFeeBps) { setError('Total fee must exceed the protocol fee; protocol fee minimum is 30 bps.'); return }
+    const valid = poolValidation.valid
+    if (!valid || !creationBaseDetails || !poolForm.id || !poolForm.name) return
+    const { baseAmount, quoteAmount, feeBps, protocolFeeBps } = valid
+    const baseDecimals = creationBaseDetails.decimals
     const safeBase = walletNumber(baseAmount, 'initial base reserve'); const safeQuote = walletNumber(quoteAmount, 'initial quote reserve')
     setBusy(true); setError(''); setPoolCreation(null)
+    let fundingTxid: string | undefined
     try {
       await assertWalletNetwork(window.arkade)
       setCreationStep('Checking pair availability')
@@ -882,11 +972,12 @@ function App() {
         { assetId: poolForm.quoteAssetId, amount: safeQuote }, { assetId: lp.assetId, amount: safeBase },
         { assetId: ledger.assetId, amount: safeBase }, { assetId: control.assetId, amount: 1 },
       ]
-      const fundingTxid = await window.arkade.sendAsset(creation.bootstrapAddress, fundingAssets, walletNumber(BigInt(creation.bootstrapSats), 'bootstrap satoshis'))
+      fundingTxid = await window.arkade.sendAsset(creation.bootstrapAddress, fundingAssets, walletNumber(BigInt(creation.bootstrapSats), 'bootstrap satoshis'))
       setCreationStep('5/5 · Open the covenant pool')
       const opened = await api<PoolCreation>(`/v1/pool-creations/${encodeURIComponent(creation.id)}/open`, { method: 'POST', body: JSON.stringify({ fundingTxid }) })
-      setPoolCreation(opened); setCreationStep('Pool opened'); await Promise.all([refreshAssets(), refreshPools(), refreshPoints()])
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+      setPoolCreation(opened); setCreationStep('Pool opened'); setPoolForm(DEFAULT_POOL_FORM)
+      await Promise.all([refreshAssets(), refreshPools(), refreshPoints()])
+    } catch (cause) { setError(fundingTxid ? paymentSentMessage(fundingTxid, cause, 'Do not create this pool again') : errorMessage(cause)) }
     finally { setBusy(false) }
   }
 
@@ -900,14 +991,14 @@ function App() {
     setReceiveAmount(previousPay)
     setQuoteMode('input')
     setQuote(null)
-    setRequest(null)
+    clearFinishedRequests()
   }
 
   async function swap() {
-    if (!address) return connect()
-    if (!pool || !raw || !quote || !window.arkade) return
-    if (raw > MAX_WALLET_AMOUNT) { setError('This wallet version cannot safely send an amount above JavaScript’s safe integer limit.'); return }
+    if (!walletReady) return requireWallet()
+    if (!pool || !raw || !quote || !window.arkade || swapBlocker) return
     setBusy(true); setError(''); setRequest(null)
+    let fundingTxid: string | undefined
     try {
       await assertWalletNetwork(window.arkade)
       const minOutput = quoteMode === 'output' && receiveRaw
@@ -918,21 +1009,30 @@ function App() {
       })
       setRequest(intent)
       const fundingSats = walletNumber(BigInt(intent.fundingSats), 'swap BTC funding')
-      const fundingTxid = sellAssetId === 'btc'
+      fundingTxid = sellAssetId === 'btc'
         ? await window.arkade.sendToAddress(intent.contractAddress, fundingSats)
         : await window.arkade.sendAsset(intent.contractAddress, [{ assetId: sellAssetId, amount: walletNumber(raw, 'asset funding') }], fundingSats)
       const funded = await api<SwapRequest>(`/v1/swaps/${intent.id}/funding`, { method: 'POST', body: JSON.stringify({ txid: fundingTxid }) })
       setRequest(funded)
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+    } catch (cause) { reportFundingFailure(cause, fundingTxid, setRequest) }
     finally { setBusy(false) }
   }
 
+  // Once the wallet has paid, the request must stay open (and the button locked) so nobody pays twice.
+  function reportFundingFailure(cause: unknown, fundingTxid: string | undefined, clearRequest: (value: null) => void) {
+    if (!fundingTxid) { clearRequest(null); setError(errorMessage(cause)); return }
+    setError(paymentSentMessage(fundingTxid, cause, 'Do not pay again; check My activity'))
+  }
+
+  function paymentSentMessage(fundingTxid: string, cause: unknown, nextStep: string): string {
+    return `Payment ${short(fundingTxid, 7)} was sent, but the app could not register it: ${errorMessage(cause)}. ${nextStep}.`
+  }
+
   async function submitLiquidity() {
-    if (!address) return connect()
-    if (!pool || !liquidityRaw || !liquidityPreview || !window.arkade || mode === 'swap') return
-    const values = [liquidityPreview.base, liquidityPreview.quote, liquidityPreview.lp]
-    if (values.some((value) => value > MAX_WALLET_AMOUNT)) { setError('This wallet version cannot safely send this amount.'); return }
+    if (!walletReady) return requireWallet()
+    if (!pool || !liquidityRaw || !liquidityPreview || !window.arkade || mode === 'swap' || liquidityBlocker) return
     setBusy(true); setError(''); setLiquidityRequest(null)
+    let fundingTxid: string | undefined
     try {
       await assertWalletNetwork(window.arkade)
       const intent = mode === 'deposit'
@@ -942,29 +1042,72 @@ function App() {
       const fundingAssets = mode === 'deposit'
         ? [...(pool.baseAssetId === 'btc' ? [] : [{ assetId: pool.baseAssetId, amount: walletNumber(BigInt(intent.baseAmount), 'base funding') }]), { assetId: pool.quoteAssetId, amount: walletNumber(BigInt(intent.quoteAmount), 'quote funding') }]
         : [{ assetId: pool.lpAssetId, amount: walletNumber(BigInt(intent.lpAmount), 'LP funding') }]
-      const txid = await window.arkade.sendAsset(intent.contractAddress, fundingAssets, mode === 'deposit'
+      fundingTxid = await window.arkade.sendAsset(intent.contractAddress, fundingAssets, mode === 'deposit'
         ? walletNumber(pool.baseAssetId === 'btc' ? BigInt(intent.baseAmount) + 330n : 330n, 'deposit BTC funding')
         : undefined)
-      setLiquidityRequest(await api<LiquidityRequest>(`/v1/liquidity/${intent.id}/funding`, { method: 'POST', body: JSON.stringify({ txid }) }))
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
+      setLiquidityRequest(await api<LiquidityRequest>(`/v1/liquidity/${intent.id}/funding`, { method: 'POST', body: JSON.stringify({ txid: fundingTxid }) }))
+    } catch (cause) { reportFundingFailure(cause, fundingTxid, setLiquidityRequest) }
     finally { setBusy(false) }
   }
 
   const balance = sellAssetId === 'btc' ? displayAmount(BigInt(btcBalance), 8, 8) : sellAsset ? displayAmount(BigInt(sellAsset.amount), sellDecimals, 4) : '0'
-  const hasQuoteAmount = quoteMode === 'input' ? raw : receiveRaw
-  const buttonText = !address ? 'Connect Inscrib3 Wallet' : !pool ? 'Select a token pair' : !pool.available ? 'Pool unavailable' : !hasQuoteAmount ? 'Enter an amount' : !quote ? 'Finding best price…' : 'Review & swap'
+  const walletActionLabel = !address ? 'Connect Inscrib3 Wallet' : walletOnWrongNetwork ? SWITCH_NETWORK_LABEL : null
   const baseTicker = pool?.baseAssetId === 'btc' ? 'BTC' : baseAsset?.metadata?.ticker ?? pool?.baseAssetInfo?.metadata?.ticker ?? 'BASE'
   const quoteTicker = pool?.quoteAssetId === 'btc' ? 'BTC' : quoteAsset?.metadata?.ticker ?? pool?.quoteAssetInfo?.metadata?.ticker ?? 'QUOTE'
+  const swapBlocker = describeSwapBlocker()
+  const liquidityBlocker = describeLiquidityBlocker()
+  const assetFormBlocker = firstFormError(assetValidation.errors, ASSET_FIELD_LABELS)
+  const poolFormBlocker = deployment ? firstFormError(poolValidation.errors, POOL_FIELD_LABELS) : 'Pool creation is unavailable right now'
+
+  function describeSwapBlocker(): string | null {
+    if (request && swapLocked) return request.status === 'failed' ? 'Dismiss the failed swap to retry' : 'Swap in progress…'
+    if (!pool) return 'Select a token pair'
+    if (!pool.available) return 'Pool unavailable'
+    const typedAmount = quoteMode === 'input' ? sellAmountCheck : parseDisplayAmount(receiveAmount, buyDecimals)
+    if ('error' in typedAmount) return typedAmount.error
+    if (raw && raw > walletBalance(sellAssetId)) return `Insufficient ${sellTicker} balance`
+    if (!quote) return 'Finding best price…'
+    return null
+  }
+
+  function describeLiquidityBlocker(): string | null {
+    if (liquidityRequest && liquidityLocked) return liquidityRequest.status === 'failed' ? 'Dismiss the failed request to retry' : 'Request in progress…'
+    if (!pool?.available) return 'Pool unavailable'
+    const typedAmount = parseDisplayAmount(liquidityAmount, mode === 'withdraw' ? lpDecimals : baseDecimals)
+    if ('error' in typedAmount) return typedAmount.error
+    if (!liquidityPreview) return 'Pool reserves unavailable'
+    const shortTicker = liquidityShortfallTicker(pool, liquidityPreview)
+    if (shortTicker) return `Insufficient ${shortTicker} balance`
+    return null
+  }
+
+  function liquidityShortfallTicker(target: Pool, preview: { base: bigint; quote: bigint; lp: bigint }): string | null {
+    if (mode === 'withdraw') return preview.lp > walletBalance(target.lpAssetId) ? 'LP' : null
+    if (preview.base > walletBalance(target.baseAssetId)) return baseTicker
+    if (preview.quote > walletBalance(target.quoteAssetId)) return quoteTicker
+    return null
+  }
 
   return (
     <div className="app-shell">
       <header>
         <button className="brand" onClick={() => navigate('swap')} aria-label="Inscrib3 app home"><img src="/logo.svg" alt="" /><span>INSCRIB3</span><small>APP</small></button>
-        <nav>{(['swap', 'pools', 'create', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') void refreshPools() }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}<a className="nav-docs" href={DOCS_URL} target="_blank" rel="noreferrer">Docs ↗</a></nav>
-        <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span>{address && <button className="points-chip" onClick={() => navigate('activity')} title="Your portable points"><span>◆</span>{points ? comma(points.total) : '—'} PTS</button>}<button className="wallet-small" onClick={() => void connect()} disabled={busy}>{address ? short(address, 4) : busy ? 'Loading wallet…' : 'Connect wallet'}</button></div>
+        <nav>{(['swap', 'pools', 'create', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') runWithToast(refreshPools) }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}<a className="nav-docs" href={DOCS_URL} target="_blank" rel="noreferrer">Docs ↗</a></nav>
+        <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span>{address && <button className="points-chip" onClick={() => navigate('activity')} title="Your portable points"><span>◆</span>{points ? comma(points.total) : '—'} PTS</button>}{address ? <span className={`wallet-address${walletOnWrongNetwork ? ' wrong-network' : ''}`} title={address}>{short(address, 4)}</span> : <button className="wallet-small" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Connect wallet'}</button>}</div>
       </header>
 
       {toast && <div className="toast error-toast" role="alert"><span>{toast}</span><button type="button" onClick={() => setToast('')} aria-label="Dismiss notification">×</button></div>}
+
+      {walletOnWrongNetwork && walletNetwork ? <div className="wallet-banner" role="alert">
+        <div><b>Switch Inscrib3 Wallet to {APP_NETWORK_NAME}</b><span>Your wallet is on {walletNetwork.displayName}. This app runs on {APP_NETWORK_NAME}.</span>
+          {showSwitchSteps && <span>This wallet version can't switch from here. Open Inscrib3 Wallet, go to Settings → Network and choose {APP_NETWORK_NAME}. This page updates by itself.</span>}</div>
+        <button className="wallet-small" onClick={() => void switchWalletNetwork()}>{SWITCH_NETWORK_LABEL}</button>
+      </div> : walletIssue && <div className="wallet-banner" role="alert">
+        <div><b>{walletIssue.title}</b><span>{walletIssue.detail}</span></div>
+        {walletIssue.kind === 'missing'
+          ? <a className="wallet-small" href={WALLET_INSTALL_URL} target="_blank" rel="noreferrer">Install wallet</a>
+          : <button className="wallet-small" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Try again'}</button>}
+      </div>}
 
       <main>
         {page === 'swap' ? <>
@@ -990,19 +1133,19 @@ function App() {
             {mode === 'swap' && <>
               {showSettings && <div className="settings"><span>Max slippage</span><div>{[10, 50, 100].map((v) => <button className={slippage === v ? 'selected' : ''} key={v} onClick={() => setSlippage(v)}>{v / 100}%</button>)}</div></div>}
               <div className="asset-box">
-              <div className="asset-top"><label>You pay</label><button className="balance" onClick={setMaxAmount}>Balance: {balance} <b>MAX</b></button></div>
+              <div className="asset-top"><label>You pay</label><button className="balance" onClick={setMaxAmount} disabled={swapLocked}>Balance: {balance} <b>MAX</b></button></div>
               <div className="asset-main">
-                <input value={amount} onChange={(event) => { setQuoteMode('input'); setAmount(event.target.value); setReceiveAmount(''); setQuote(null); setRequest(null); setError('') }} placeholder="0" inputMode="decimal" aria-label="Amount to sell" />
+                <input value={amount} onChange={(event) => { setQuoteMode('input'); setAmount(event.target.value); setReceiveAmount(''); setQuote(null); setRequest(null); setError('') }} placeholder="0" inputMode="decimal" aria-label="Amount to sell" disabled={swapLocked} />
                 <button className="token-select" onClick={openPairModal}><TokenMark label={sellTicker} /><span>{sellTicker}</span><small>⌄</small></button>
               </div>
               <div className="asset-foot"><span>{sellAssetId ? tokenDetails(sellAssetId).name : 'Select a pool'}</span><span>Arkade asset</span></div>
               </div>
 
-              <div className="switch-row"><span /><button onClick={reverse} aria-label="Reverse swap direction">↓</button><span /></div>
+              <div className="switch-row"><span /><button onClick={reverse} disabled={swapLocked} aria-label="Reverse swap direction">↓</button><span /></div>
 
               <div className="asset-box receive">
               <div className="asset-top"><label>You receive</label><span>{quoteMode === 'output' ? 'Exact output' : 'Estimated'}</span></div>
-              <div className="asset-main"><input value={receiveAmount} onChange={(event) => { setQuoteMode('output'); setReceiveAmount(event.target.value); setAmount(''); setQuote(null); setRequest(null); setError('') }} placeholder="0" inputMode="decimal" aria-label="Amount to receive" /><button className="token-select" onClick={openPairModal}><TokenMark label={buyTicker} warm /><span>{buyTicker}</span><small>⌄</small></button></div>
+              <div className="asset-main"><input value={receiveAmount} onChange={(event) => { setQuoteMode('output'); setReceiveAmount(event.target.value); setAmount(''); setQuote(null); setRequest(null); setError('') }} placeholder="0" inputMode="decimal" aria-label="Amount to receive" disabled={swapLocked} /><button className="token-select" onClick={openPairModal}><TokenMark label={buyTicker} warm /><span>{buyTicker}</span><small>⌄</small></button></div>
               <div className="asset-foot"><span>{buyAssetId ? tokenDetails(buyAssetId).name : '—'}</span><span>{quoteMode === 'output' ? `Quoted output: ${quote ? displayAmount(quote.outputAmount, buyDecimals) : '—'}` : `Minimum: ${quote ? displayAmount((BigInt(quote.outputAmount) * BigInt(10_000 - slippage)) / 10_000n, buyDecimals) : '—'}`}</span></div>
               </div>
 
@@ -1017,14 +1160,14 @@ function App() {
               <div><span>Slippage protection</span><b>{(slippage / 100).toFixed(2)}%</b></div>
               </div>}
 
-              <button className="primary" onClick={() => void swap()} disabled={busy || (!!address && (!raw || !quote || !pool?.available))}>{busy && <Spinner />}{buttonText}</button>
+              <button className="primary" onClick={() => void swap()} disabled={busy || connecting || (walletReady && swapBlocker !== null)}>{busy && <Spinner />}{walletActionLabel ?? swapBlocker ?? 'Review & swap'}</button>
             </>}
 
             {mode !== 'swap' && <>
               <div className="asset-box">
                 <div className="asset-top"><label>{mode === 'deposit' ? 'Base amount to add' : 'LP tokens to burn'}</label><span>Raw-unit exact</span></div>
                 <div className="asset-main">
-                  <input value={liquidityAmount} onChange={(event) => { setLiquidityAmount(event.target.value); setLiquidityRequest(null); setError('') }} placeholder="0" inputMode="decimal" aria-label="Liquidity amount" />
+                  <input value={liquidityAmount} onChange={(event) => { setLiquidityAmount(event.target.value); setLiquidityRequest(null); setError('') }} placeholder="0" inputMode="decimal" aria-label="Liquidity amount" disabled={liquidityLocked} />
                   <div className="token-select static"><TokenMark label={mode === 'deposit' ? baseTicker : 'LP'} /><span>{mode === 'deposit' ? baseTicker : 'LP'}</span></div>
                 </div>
                 <div className="asset-foot"><span>{mode === 'deposit' ? `Balance: ${pool?.baseAssetId === 'btc' ? displayAmount(BigInt(btcBalance), 8, 8) : baseAsset ? displayAmount(BigInt(baseAsset.amount), baseDecimals) : '0'}` : `Balance: ${lpAsset ? displayAmount(BigInt(lpAsset.amount), lpDecimals) : '0'}`}</span><span>{mode === 'deposit' ? 'Pool ratio is fixed at funding' : 'Pro-rata redemption'}</span></div>
@@ -1033,11 +1176,11 @@ function App() {
                 <div><span>{mode === 'deposit' ? 'Required quote' : 'Base received'}</span><b>{liquidityPreview ? displayAmount(mode === 'deposit' ? liquidityPreview.quote : liquidityPreview.base, mode === 'deposit' ? quoteDecimals : baseDecimals) : '—'} {mode === 'deposit' ? quoteTicker : baseTicker}</b></div>
                 <div><span>{mode === 'deposit' ? 'LP received' : 'Quote received'}</span><b>{liquidityPreview ? displayAmount(mode === 'deposit' ? liquidityPreview.lp : liquidityPreview.quote, mode === 'deposit' ? lpDecimals : quoteDecimals) : '—'} {mode === 'deposit' ? 'LP' : quoteTicker}</b></div>
               </div>
-              <button className="primary" onClick={() => void submitLiquidity()} disabled={busy || (!!address && (!liquidityRaw || !liquidityPreview || !pool?.available))}>{busy && <Spinner />}{!address ? 'Connect Inscrib3 Wallet' : !liquidityRaw ? 'Enter an amount' : mode === 'deposit' ? 'Fund liquidity deposit' : 'Fund LP withdrawal'}</button>
+              <button className="primary" onClick={() => void submitLiquidity()} disabled={busy || connecting || (walletReady && liquidityBlocker !== null)}>{busy && <Spinner />}{walletActionLabel ?? liquidityBlocker ?? (mode === 'deposit' ? 'Fund liquidity deposit' : 'Fund LP withdrawal')}</button>
             </>}
             {error && <div className="notice error"><b>Transaction unavailable</b><span>{error}</span></div>}
-            {mode === 'swap' && request && <div className={`notice status ${request.status}`}><b>{request.status === 'settled' ? 'Swap complete' : request.status === 'funded' ? 'Swap funded' : request.status === 'failed' ? 'Swap failed' : request.status === 'refunded' ? 'Swap refunded' : 'Swap request created'}</b><span>{request.status === 'settled' ? `Settlement ${short(request.settlementTxid ?? '')} · +${request.rewardPoints ?? '1'} points` : request.status === 'failed' ? request.error ?? 'The swap could not be completed.' : request.status === 'refunded' ? `Refund ${short(request.settlementTxid ?? '')}` : `Waiting for the next pool sweep… · ${request.rewardPoints ?? '1'} points pending`}</span><i /></div>}
-            {mode !== 'swap' && liquidityRequest && <div className={`notice status ${liquidityRequest.status}`}><b>{liquidityRequest.status === 'settled' ? 'Liquidity update complete' : liquidityRequest.status === 'funded' ? 'Request funded' : 'Liquidity request created'}</b><span>{liquidityRequest.status === 'settled' ? `Settlement ${short(liquidityRequest.settlementTxid ?? '')}` : 'Waiting for the next liquidity sweep…'}</span><i /></div>}
+            {mode === 'swap' && request && <RequestNotice noun="Swap" request={request} onDismiss={() => setRequest(null)} />}
+            {mode !== 'swap' && liquidityRequest && <RequestNotice noun="Liquidity request" request={liquidityRequest} onDismiss={() => setLiquidityRequest(null)} />}
             {controlledPoolAssets.length > 0 && <div className="notice asset-risk"><b>Controlled asset supply</b><span>{controlledPoolAssets.map((info) => `${info.assetId === pool?.baseAssetId ? baseTicker : quoteTicker}: ${short(info.controlAssetId ?? '', 8)}`).join(' · ')}. Holders of these control assets may authorize additional issuance, which can affect pool value.</span></div>}
             <p className="security"><span>◇</span> Your wallet funds a covenant-bound request. The coordinator cannot redirect your payout.</p>
           </div>
@@ -1058,7 +1201,7 @@ function App() {
           </aside>
         </section>
         </> : page === 'pools' ? <section className="view-page">
-          <div className="view-heading"><div><span className="eyebrow"><i /> LIVE LIQUIDITY</span><h1>Pools</h1><p>Current covenant reserves and AMM identifiers.</p></div><button className="secondary" onClick={() => void refreshPools()}>Refresh</button></div>
+          <div className="view-heading"><div><span className="eyebrow"><i /> LIVE LIQUIDITY</span><h1>Pools</h1><p>Current covenant reserves and AMM identifiers.</p></div><button className="secondary" onClick={() => runWithToast(refreshPools)}>Refresh</button></div>
           <div className="pool-search-row">
             <label className="search-field"><span aria-hidden="true">⌕</span><input type="search" value={poolSearch} onChange={(event) => updatePoolSearch(event.target.value)} placeholder="Search by pool, ticker or asset ID" aria-label="Search pools" />{poolSearch && <button type="button" onClick={() => updatePoolSearch('')} aria-label="Clear pool search">×</button>}</label>
             <span>{filteredPools.length} of {poolResultTotal} pools</span>
@@ -1076,10 +1219,10 @@ function App() {
               <div className="id-list"><div><span>Quote asset</span><code>{short(item.quoteAssetId, 10)}</code></div><div><span>LP asset</span><code>{short(item.lpAssetId, 10)}</code></div></div>
               {(item.baseAssetInfo?.controlled || item.quoteAssetInfo?.controlled) && <div className="pool-risk"><b>Controlled supply</b><span>{[item.baseAssetInfo, item.quoteAssetInfo].filter((info) => info?.controlled).map((info) => short(info!.controlAssetId ?? '', 8)).join(' · ')}</span></div>}
               {item.error && <p className="pool-error">{item.error}</p>}
-               <div className="pool-card-actions"><button className="secondary" onClick={() => openPoolDetail(item)}>View details</button><button className="secondary" onClick={() => { replaceSwapUrl(item, item.baseAssetId); setPoolId(item.id); setSellAssetId(item.baseAssetId); setAmount(''); setReceiveAmount(''); setQuote(null); setPage('swap') }}>Trade this pool</button></div>
+               <div className="pool-card-actions"><button className="secondary" onClick={() => openPoolDetail(item)}>View details</button><button className="secondary" onClick={() => switchToPool(item, 'push')}>Trade this pool</button></div>
              </article>
            })}</div>}
-           {poolCursor && <button className="secondary load-more" onClick={() => void loadMorePools()}>Load more pools</button>}
+           {poolCursor && <button className="secondary load-more" onClick={() => runWithToast(loadMorePools)}>Load more pools</button>}
         </section> : page === 'pool' ? <section className="view-page pool-detail-page">
           {!pool ? <div className="empty-state">Pool not found.</div> : (() => {
             const base = tokenDetails(pool.baseAssetId)
@@ -1092,7 +1235,7 @@ function App() {
               <div className="pool-detail-hero">
                 <button className="back-link" onClick={() => navigate('pools')}>← All pools</button>
                 <div className="pool-detail-title"><div className="marks"><TokenMark label={base.ticker} /><TokenMark label={quoteToken.ticker} warm /></div><div><span className="eyebrow"><i /> POOL DETAIL</span><div className="pool-title-row"><h1>{pool.name}</h1>{pool.onFire && <span className="fire-badge" title={`${pool.activity24h ?? 0} settled operations in the last 24 hours`}>🔥 On fire</span>}</div><p><span className={pool.available ? 'live-dot' : 'offline-dot'} /> {pool.available ? 'Pool active' : 'Pool unavailable'} · {pool.feeBps} bps total fee</p></div></div>
-                <button className="primary compact" onClick={() => { replaceSwapUrl(pool, pool.baseAssetId); setSellAssetId(pool.baseAssetId); setAmount(''); setReceiveAmount(''); setQuote(null); setPage('swap') }}>Trade this pool</button>
+                <button className="primary compact" onClick={() => switchToPool(pool, 'push')}>Trade this pool</button>
               </div>
 
               <div className="metric-grid">
@@ -1111,7 +1254,7 @@ function App() {
                 </article>)}
               </div>
 
-              <div className="activity-section-heading"><div><span className="eyebrow"><i /> LIVE FEED</span><h2>Pool activity</h2><p>Swap, liquidity additions and removals for this pool.</p></div><button className="secondary" onClick={() => void refreshPoolActivity()}>Refresh</button></div>
+              <div className="activity-section-heading"><div><span className="eyebrow"><i /> LIVE FEED</span><h2>Pool activity</h2><p>Swap, liquidity additions and removals for this pool.</p></div><button className="secondary" onClick={() => runWithToast(refreshPoolActivity)}>Refresh</button></div>
               <div className="activity-panel">
                 <div className="activity-head"><span>Type</span><span>Amount</span><span>Status</span><span>Transaction</span></div>
                 {activity.length === 0 ? <div className="empty-state">No activity for this pool yet.</div> : activity.map((item) => {
@@ -1121,7 +1264,7 @@ function App() {
                   return <div className="activity-row" key={`${item.activityType}-${item.id}`}><div><span className={`activity-icon ${item.activityType}`}>{isSwap ? '↔' : item.activityType === 'deposit' ? '+' : '−'}</span><div><b>{isSwap ? 'Swap' : item.activityType === 'deposit' ? 'Add liquidity' : 'Remove liquidity'}</b><small>{item.createdAt ? new Date(item.createdAt).toLocaleString() : short(item.id)}</small></div></div><code>{amountText}</code><span className={`status-pill ${item.status}`}>{item.status.replace('-', ' ')}</span><code title={item.settlementTxid ?? item.fundingTxid ?? ''}>{item.settlementTxid || item.fundingTxid ? short(item.settlementTxid ?? item.fundingTxid!, 7) : '—'}</code></div>
                 })}
               </div>
-              {activityCursor && <button className="secondary load-more" onClick={() => void loadMoreActivity()}>Load more activity</button>}
+              {activityCursor && <button className="secondary load-more" onClick={() => runWithToast(loadMoreActivity)}>Load more activity</button>}
             </>
           })()}
         </section> : page === 'create' ? <section className="view-page create-page">
@@ -1131,13 +1274,13 @@ function App() {
             <article className="create-card">
               <div className="card-head"><div><h2>Issue a new asset</h2><span>Non-custodial issuance through Inscrib3 Wallet</span></div></div>
               <div className="form-grid">
-                <label><span>Name</span><input value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} placeholder="My Arkade Asset" /></label>
-                <label><span>Ticker</span><input value={assetForm.ticker} onChange={(e) => setAssetForm({ ...assetForm, ticker: e.target.value.toUpperCase() })} placeholder="ASSET" maxLength={16} /></label>
-                <label><span>Initial supply</span><input value={assetForm.supply} onChange={(e) => setAssetForm({ ...assetForm, supply: e.target.value })} placeholder="1000000" inputMode="decimal" /></label>
-                <label><span>Decimals</span><input value={assetForm.decimals} onChange={(e) => setAssetForm({ ...assetForm, decimals: e.target.value })} placeholder="0" inputMode="numeric" /></label>
-                <label className="wide"><span>Icon URL <small>optional</small></span><input value={assetForm.icon} onChange={(e) => setAssetForm({ ...assetForm, icon: e.target.value })} placeholder="https://…" /></label>
+                <label><span>Name</span><input value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} placeholder="My Arkade Asset" /><FieldError message={assetValidation.errors.name} value={assetForm.name} /></label>
+                <label><span>Ticker</span><input value={assetForm.ticker} onChange={(e) => setAssetForm({ ...assetForm, ticker: e.target.value.toUpperCase() })} placeholder="ASSET" maxLength={16} /><FieldError message={assetValidation.errors.ticker} value={assetForm.ticker} /></label>
+                <label><span>Initial supply</span><input value={assetForm.supply} onChange={(e) => setAssetForm({ ...assetForm, supply: e.target.value })} placeholder="1000000" inputMode="decimal" /><FieldError message={assetValidation.errors.supply} value={assetForm.supply} /></label>
+                <label><span>Decimals</span><input value={assetForm.decimals} onChange={(e) => setAssetForm({ ...assetForm, decimals: e.target.value })} placeholder="0" inputMode="numeric" /><FieldError message={assetValidation.errors.decimals} value={assetForm.decimals} /></label>
+                <label className="wide"><span>Icon URL <small>optional</small></span><input value={assetForm.icon} onChange={(e) => setAssetForm({ ...assetForm, icon: e.target.value })} placeholder="https://…" /><FieldError message={assetValidation.errors.icon} value={assetForm.icon} /></label>
               </div>
-              <button className="primary" disabled={busy} onClick={() => void createAsset()}>{busy && <Spinner />}{address ? 'Review asset issuance' : 'Connect Inscrib3 Wallet'}</button>
+              <button className="primary" disabled={busy || connecting || (walletReady && assetFormBlocker !== null)} onClick={() => void createAsset()}>{busy && <Spinner />}{walletActionLabel ?? assetFormBlocker ?? 'Review asset issuance'}</button>
               {creationStep && <div className="creation-progress"><i className={issuedAsset ? 'done' : ''} /><span>{creationStep}</span></div>}
               {issuedAsset && <div className="result-box"><span>Asset ID</span><code>{issuedAsset.assetId}</code><span>Issuance transaction</span><code>{issuedAsset.arkTxId}</code></div>}
             </article>
@@ -1149,11 +1292,11 @@ function App() {
                 <label><span>Pool slug <small>derived from tickers</small></span><input value={poolForm.id} placeholder="Select both assets" readOnly /></label>
                 <label><span>Display name <small>derived from the pair</small></span><input value={poolForm.name} placeholder="Select both assets" readOnly /></label>
                 <label><span>Base asset</span><select value={poolForm.baseAssetId} onChange={(e) => updatePoolPair(e.target.value, poolForm.quoteAssetId)}><option value="btc">BTC · native</option>{assets.map((item) => <option key={item.assetId} value={item.assetId}>{item.metadata?.ticker ?? short(item.assetId)}</option>)}</select></label>
-                <label><span>Quote asset</span><select value={poolForm.quoteAssetId} onChange={(e) => updatePoolPair(poolForm.baseAssetId, e.target.value)}><option value="">Select asset</option>{assets.filter((item) => item.assetId !== poolForm.baseAssetId).map((item) => <option key={item.assetId} value={item.assetId}>{item.metadata?.ticker ?? short(item.assetId)}</option>)}</select></label>
-                <label><span>Initial base reserve <small>{creationBaseDetails ? `${creationBaseDetails.ticker} display units · ${creationBaseDetails.decimals} decimals` : 'select an asset'}</small></span><input value={poolForm.baseAmount} onChange={(e) => setPoolForm({ ...poolForm, baseAmount: e.target.value })} placeholder={poolForm.baseAssetId === 'btc' ? '0.002' : '100'} inputMode="decimal" /></label>
-                <label><span>Initial quote reserve <small>{creationQuoteDetails ? `${creationQuoteDetails.ticker} display units · ${creationQuoteDetails.decimals} decimals` : 'select an asset'}</small></span><input value={poolForm.quoteAmount} onChange={(e) => setPoolForm({ ...poolForm, quoteAmount: e.target.value })} placeholder="100" inputMode="decimal" /></label>
-                <label><span>Total fee · bps</span><input value={poolForm.feeBps} onChange={(e) => setPoolForm({ ...poolForm, feeBps: e.target.value })} inputMode="numeric" min="31" /></label>
-                <label><span>Protocol fee · min 30 bps</span><input value={poolForm.protocolFeeBps} onChange={(e) => setPoolForm({ ...poolForm, protocolFeeBps: e.target.value })} inputMode="numeric" min="30" /></label>
+                <label><span>Quote asset</span><select value={poolForm.quoteAssetId} onChange={(e) => updatePoolPair(poolForm.baseAssetId, e.target.value)}><option value="">Select asset</option>{assets.filter((item) => item.assetId !== poolForm.baseAssetId).map((item) => <option key={item.assetId} value={item.assetId}>{item.metadata?.ticker ?? short(item.assetId)}</option>)}</select><FieldError message={poolValidation.errors.quoteAssetId} value={poolForm.quoteAssetId} /></label>
+                <label><span>Initial base reserve <small>{creationBaseDetails ? `${creationBaseDetails.ticker} display units · ${creationBaseDetails.decimals} decimals` : 'select an asset'}</small></span><input value={poolForm.baseAmount} onChange={(e) => setPoolForm({ ...poolForm, baseAmount: e.target.value })} placeholder={poolForm.baseAssetId === 'btc' ? '0.002' : '100'} inputMode="decimal" /><FieldError message={poolValidation.errors.baseAmount} value={poolForm.baseAmount} /></label>
+                <label><span>Initial quote reserve <small>{creationQuoteDetails ? `${creationQuoteDetails.ticker} display units · ${creationQuoteDetails.decimals} decimals` : 'select an asset'}</small></span><input value={poolForm.quoteAmount} onChange={(e) => setPoolForm({ ...poolForm, quoteAmount: e.target.value })} placeholder="100" inputMode="decimal" /><FieldError message={poolValidation.errors.quoteAmount} value={poolForm.quoteAmount} /></label>
+                <label><span>Total fee · bps</span><input value={poolForm.feeBps} onChange={(e) => setPoolForm({ ...poolForm, feeBps: e.target.value })} inputMode="numeric" /><FieldError message={poolValidation.errors.feeBps} value={poolForm.feeBps} /></label>
+                <label><span>Protocol fee · min {MIN_PROTOCOL_FEE_BPS} bps</span><input value={poolForm.protocolFeeBps} onChange={(e) => setPoolForm({ ...poolForm, protocolFeeBps: e.target.value })} inputMode="numeric" /><FieldError message={poolValidation.errors.protocolFeeBps} value={poolForm.protocolFeeBps} /></label>
               </div>
               <div className="fee-summary">
                 <div><span>Initial liquidity</span><b title={initialLiquiditySummary}>{initialLiquiditySummary}</b></div>
@@ -1164,7 +1307,7 @@ function App() {
                 <div><span>Stable Treasury Vault</span><code title={deployment?.platformTreasuryAddress}>{deployment ? short(deployment.platformTreasuryAddress, 8) : 'Unavailable'}</code></div>
               </div>
               {controlledCreationAssets.length > 0 && <div className="notice asset-risk"><b>Reissuable asset warning</b><span>{controlledCreationAssets.map((asset) => `${asset.metadata?.ticker ?? short(asset.assetId)} · control ${short(asset.controlAssetId!, 8)}`).join(' · ')}. Additional supply may be issued by the control holder.</span></div>}
-              <button className="primary" disabled={busy} onClick={() => void createPool()}>{busy && <Spinner />}{address ? 'Issue pool assets & open pool' : 'Connect Inscrib3 Wallet'}</button>
+              <button className="primary" disabled={busy || connecting || (walletReady && poolFormBlocker !== null)} onClick={() => void createPool()}>{busy && <Spinner />}{walletActionLabel ?? poolFormBlocker ?? 'Issue pool assets & open pool'}</button>
               {creationStep && <div className="creation-progress"><i className={poolCreation?.status === 'opened' ? 'done' : ''} /><span>{creationStep}</span></div>}
               {poolCreation && <div className="result-box"><span>Status</span><b>{poolCreation.status}</b>{poolCreation.status === 'opened' && <><span>Points earned</span><b className="points-earned">+10 PTS</b></>}<span>Bootstrap covenant</span><code>{poolCreation.bootstrapAddress}</code>{poolCreation.openingTxid && <><span>Opening transaction</span><code>{poolCreation.openingTxid}</code></>}</div>}
             </article>
@@ -1172,8 +1315,8 @@ function App() {
           </div>}
           {error && <div className="notice error create-error"><b>Creation unavailable</b><span>{error}</span></div>}
         </section> : <section className="view-page">
-          <div className="view-heading"><div><span className="eyebrow"><i /> WALLET HISTORY</span><h1>My activity</h1><p>Your portable score, swaps, deposits, and withdrawals across the platform.</p></div>{address && <button className="secondary" onClick={() => { void refreshWalletActivity(); void refreshPoints() }}>Refresh</button>}</div>
-          {!address ? <div className="empty-state activity-connect-state"><div className="activity-connect-icon">◇</div><h2>Connect your wallet</h2><p>Connect Inscrib3 Wallet to view your score and activity across every pool.</p><button className="secondary" onClick={() => void connect()}>Connect wallet</button></div> : <>
+          <div className="view-heading"><div><span className="eyebrow"><i /> WALLET HISTORY</span><h1>My activity</h1><p>Your portable score, swaps, deposits, and withdrawals across the platform.</p></div>{address && <button className="secondary" onClick={() => runWithToast(() => Promise.all([refreshWalletActivity(), refreshPoints()]))}>Refresh</button>}</div>
+          {!address ? <div className="empty-state activity-connect-state"><div className="activity-connect-icon">◇</div><h2>Connect your wallet</h2><p>Connect Inscrib3 Wallet to view your score and activity across every pool.</p><button className="secondary" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Connect wallet'}</button></div> : <>
           <div className="points-dashboard">
             <section className="points-score-card"><span>YOUR SCORE</span><div><b>{points ? comma(points.total) : '—'}</b><em>PTS</em></div><p>{points?.rank ? `Rank #${points.rank} of ${points.participants}` : 'Complete an eligible action to enter the ranking'}</p><small>Mutinynet points will migrate to Mainnet with the same wallet identity.</small><a href="https://docs.inscrib3.com/app/points" target="_blank" rel="noreferrer">Migration details ↗</a></section>
             <section className="points-breakdown"><div><span>POOL CREATION</span><b>{points ? comma(points.poolPoints) : '—'}</b><small>10 points per opened pool</small></div><div><span>SWAPS</span><b>{points ? comma(points.swapPoints) : '—'}</b><small>At least 1 point · scales with protocol fee sats</small></div></section>
@@ -1199,7 +1342,7 @@ function App() {
               </div>
             })}
           </div></>}
-          {activityCursor && <button className="secondary load-more" onClick={() => void loadMoreActivity()}>Load more activity</button>}
+          {activityCursor && <button className="secondary load-more" onClick={() => runWithToast(loadMoreActivity)}>Load more activity</button>}
         </section>}
       </main>
 
