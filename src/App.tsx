@@ -369,17 +369,17 @@ function App() {
   const buyAsset = assets.find((a) => a.assetId === buyAssetId)
   const sellPoolInfo = pool?.baseAssetId === sellAssetId ? pool.baseAssetInfo : pool?.quoteAssetId === sellAssetId ? pool.quoteAssetInfo : undefined
   const buyPoolInfo = pool?.baseAssetId === buyAssetId ? pool.baseAssetInfo : pool?.quoteAssetId === buyAssetId ? pool.quoteAssetInfo : undefined
-  const sellDecimals = sellAsset?.metadata?.decimals ?? sellPoolInfo?.metadata?.decimals ?? (sellAssetId === 'btc' ? 8 : 0)
-  const buyDecimals = buyAsset?.metadata?.decimals ?? buyPoolInfo?.metadata?.decimals ?? (buyAssetId === 'btc' ? 8 : 0)
-  const sellTicker = sellAssetId === 'btc' ? 'BTC' : sellAsset?.metadata?.ticker ?? sellPoolInfo?.metadata?.ticker ?? (pool?.name.split('/')[sellAssetId === pool?.quoteAssetId ? 1 : 0]?.trim() || 'ASSET')
-  const buyTicker = !buyAssetId ? 'SELECT' : buyAssetId === 'btc' ? 'BTC' : buyAsset?.metadata?.ticker ?? buyPoolInfo?.metadata?.ticker ?? (pool?.name.split('/')[buyAssetId === pool?.quoteAssetId ? 1 : 0]?.trim() || 'ASSET')
+  const sellDecimals = sellPoolInfo?.metadata?.decimals ?? sellAsset?.metadata?.decimals ?? (sellAssetId === 'btc' ? 8 : 0)
+  const buyDecimals = buyPoolInfo?.metadata?.decimals ?? buyAsset?.metadata?.decimals ?? (buyAssetId === 'btc' ? 8 : 0)
+  const sellTicker = sellAssetId === 'btc' ? 'BTC' : sellPoolInfo?.metadata?.ticker ?? sellAsset?.metadata?.ticker ?? (pool?.name.split('/')[sellAssetId === pool?.quoteAssetId ? 1 : 0]?.trim() || 'ASSET')
+  const buyTicker = !buyAssetId ? 'SELECT' : buyAssetId === 'btc' ? 'BTC' : buyPoolInfo?.metadata?.ticker ?? buyAsset?.metadata?.ticker ?? (pool?.name.split('/')[buyAssetId === pool?.quoteAssetId ? 1 : 0]?.trim() || 'ASSET')
   const raw = rawAmount(amount, sellDecimals)
   const receiveRaw = rawAmount(receiveAmount, buyDecimals)
   const baseAsset = assets.find((asset) => asset.assetId === pool?.baseAssetId)
   const quoteAsset = assets.find((asset) => asset.assetId === pool?.quoteAssetId)
   const lpAsset = assets.find((asset) => asset.assetId === pool?.lpAssetId)
-  const baseDecimals = baseAsset?.metadata?.decimals ?? pool?.baseAssetInfo?.metadata?.decimals ?? (pool?.baseAssetId === 'btc' ? 8 : 0)
-  const quoteDecimals = quoteAsset?.metadata?.decimals ?? pool?.quoteAssetInfo?.metadata?.decimals ?? (pool?.quoteAssetId === 'btc' ? 8 : 0)
+  const baseDecimals = pool?.baseAssetInfo?.metadata?.decimals ?? baseAsset?.metadata?.decimals ?? (pool?.baseAssetId === 'btc' ? 8 : 0)
+  const quoteDecimals = pool?.quoteAssetInfo?.metadata?.decimals ?? quoteAsset?.metadata?.decimals ?? (pool?.quoteAssetId === 'btc' ? 8 : 0)
   const lpDecimals = lpAsset?.metadata?.decimals ?? baseDecimals
   const liquidityRaw = rawAmount(liquidityAmount, mode === 'withdraw' ? lpDecimals : baseDecimals)
   const liquidityPreview = (() => {
@@ -407,9 +407,9 @@ function App() {
     const walletAsset = assets.find((item) => item.assetId === assetId)
     const catalogAsset = catalogAssets.find((item) => item.assetId === assetId)
     const poolInfo = pools.flatMap((item) => [item.baseAssetInfo, item.quoteAssetInfo]).find((info) => info?.assetId === assetId)
-    const ticker = assetId === 'btc' ? 'BTC' : walletAsset?.metadata?.ticker ?? catalogAsset?.metadata?.ticker ?? poolInfo?.metadata?.ticker ?? short(assetId || 'TOKEN')
-    const decimals = assetId === 'btc' ? 8 : walletAsset?.metadata?.decimals ?? catalogAsset?.metadata?.decimals ?? poolInfo?.metadata?.decimals ?? 0
-    return { ticker, decimals, name: assetId === 'btc' ? 'Native Bitcoin' : walletAsset?.metadata?.name ?? catalogAsset?.metadata?.name ?? poolInfo?.metadata?.name ?? short(assetId, 10), controlled: walletAsset?.controlAssetId ?? catalogAsset?.controlAssetId ?? poolInfo?.controlAssetId }
+    const ticker = assetId === 'btc' ? 'BTC' : poolInfo?.metadata?.ticker ?? walletAsset?.metadata?.ticker ?? catalogAsset?.metadata?.ticker ?? short(assetId || 'TOKEN')
+    const decimals = assetId === 'btc' ? 8 : poolInfo?.metadata?.decimals ?? walletAsset?.metadata?.decimals ?? catalogAsset?.metadata?.decimals ?? 0
+    return { ticker, decimals, name: assetId === 'btc' ? 'Native Bitcoin' : poolInfo?.metadata?.name ?? walletAsset?.metadata?.name ?? catalogAsset?.metadata?.name ?? short(assetId, 10), controlled: poolInfo?.controlAssetId ?? walletAsset?.controlAssetId ?? catalogAsset?.controlAssetId }
   }
 
   function updatePoolPair(baseAssetId: string, quoteAssetId: string) {
