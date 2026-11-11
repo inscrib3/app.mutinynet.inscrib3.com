@@ -33,6 +33,7 @@ interface AssetInfo {
 interface AssetRisk { assetId: string; controlled: boolean; controlAssetId?: string; supply?: string; metadata?: { name?: string; ticker?: string; decimals?: number; icon?: string } }
 interface CatalogAsset { assetId: string; controlAssetId?: string; supply?: string; metadata?: { name?: string; ticker?: string; decimals?: number; icon?: string } }
 interface PageResult<T> { items: T[]; total: number; nextCursor?: string }
+interface CursorPage<T> { items: T[]; nextCursor?: string }
 
 interface BalanceInfo { available: number; total: number }
 
@@ -92,6 +93,7 @@ interface LiquidityRequest extends Omit<SwapRequest, 'fundingSats'> {
   quoteAmount: string
   lpAmount: string
 }
+type ActivityEvent = (SwapRequest & { activityType: 'swap' }) | (LiquidityRequest & { activityType: 'deposit' | 'withdraw' })
 
 interface IssueAssetResult { arkTxId: string; assetId: string }
 interface PoolCreation {
@@ -124,6 +126,15 @@ declare global { interface Window { arkade?: ArkadeProvider } }
 
 const short = (value: string, edge = 5) => value.length > edge * 2 ? `${value.slice(0, edge)}…${value.slice(-edge)}` : value
 const comma = (value: string | bigint) => BigInt(value).toLocaleString()
+
+function ratio(numerator: bigint, denominator: bigint, precision = 8): string {
+  if (denominator === 0n) return '—'
+  const scale = 10n ** BigInt(precision)
+  const scaled = (numerator * scale) / denominator
+  const whole = scaled / scale
+  const fraction = (scaled % scale).toString().padStart(precision, '0').replace(/0+$/, '')
+  return fraction ? `${whole.toLocaleString()}.${fraction}` : whole.toLocaleString()
+}
 
 function walletNumber(value: bigint, name: string): number {
   if (value < 0n || value > MAX_WALLET_AMOUNT) throw new Error(`${name} exceeds the wallet safe integer range`)
@@ -186,7 +197,7 @@ function TokenMark({ label, warm = false }: { label: string; warm?: boolean }) {
 function Spinner() { return <span className="spinner" aria-hidden="true" /> }
 
 function App() {
-  const [page, setPage] = useState<'swap' | 'pools' | 'create' | 'activity'>('swap')
+  const [page, setPage] = useState<'swap' | 'pools' | 'pool' | 'create' | 'activity'>('swap')
   const [mode, setMode] = useState<'swap' | 'deposit' | 'withdraw'>('swap')
   const [pools, setPools] = useState<Pool[]>([])
   const [poolResults, setPoolResults] = useState<Pool[]>([])
@@ -215,7 +226,8 @@ function App() {
   const [request, setRequest] = useState<SwapRequest | null>(null)
   const [liquidityAmount, setLiquidityAmount] = useState('')
   const [liquidityRequest, setLiquidityRequest] = useState<LiquidityRequest | null>(null)
-  const [activity, setActivity] = useState<Array<(SwapRequest & { activityType: 'swap' }) | (LiquidityRequest & { activityType: 'deposit' | 'withdraw' })>>([])
+  const [activity, setActivity] = useState<ActivityEvent[]>([])
+  const [activityCursor, setActivityCursor] = useState<string | undefined>()
   const [createMode, setCreateMode] = useState<'asset' | 'pool'>('asset')
   const [assetForm, setAssetForm] = useState({ name: '', ticker: '', supply: '', decimals: '0', icon: '' })
   const [issuedAsset, setIssuedAsset] = useState<IssueAssetResult | null>(null)
@@ -389,15 +401,19 @@ function App() {
 
   const refreshActivity = useCallback(async () => {
     if (!poolId) return
-    const [swaps, liquidity] = await Promise.all([
-      api<SwapRequest[]>(`/v1/swaps?poolId=${encodeURIComponent(poolId)}`),
-      api<LiquidityRequest[]>(`/v1/liquidity?poolId=${encodeURIComponent(poolId)}`),
-    ])
-    setActivity([
-      ...swaps.map((item) => ({ ...item, activityType: 'swap' as const })),
-      ...liquidity.map((item) => ({ ...item, activityType: item.kind })),
-    ].sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0)))
+    const result = await api<CursorPage<ActivityEvent>>(`/v1/pools/${encodeURIComponent(poolId)}/activity?limit=25`)
+    setActivity(result.items); setActivityCursor(result.nextCursor)
   }, [poolId])
+
+  async function loadMoreActivity() {
+    if (!poolId || !activityCursor) return
+    const result = await api<CursorPage<ActivityEvent>>(`/v1/pools/${encodeURIComponent(poolId)}/activity?limit=25&cursor=${encodeURIComponent(activityCursor)}`)
+    setActivity((current) => [...current, ...result.items]); setActivityCursor(result.nextCursor)
+  }
+
+  const openPoolDetail = useCallback((target: Pool) => {
+    setPoolId(target.id); setPage('pool'); setError('')
+  }, [])
 
   useEffect(() => {
     Promise.all([api<DeploymentInfo>('/health'), api<PageResult<Pool>>('/v1/pools?limit=100')]).then(([info, page]) => {
@@ -502,8 +518,12 @@ function App() {
   }, [liquidityRequest, refreshAssets, refreshPools])
 
   useEffect(() => {
-    if (page !== 'activity' || !poolId) return
-    const timer = window.setInterval(() => void refreshActivity().catch(() => undefined), 5000)
+    if ((page !== 'activity' && page !== 'pool') || !poolId) return
+    void Promise.all([
+      api<CursorPage<ActivityEvent>>(`/v1/pools/${encodeURIComponent(poolId)}/activity?limit=25`).then((result) => { setActivity(result.items); setActivityCursor(result.nextCursor) }),
+      api<Pool>(`/v1/pools/${encodeURIComponent(poolId)}`).then((next) => setPools((current) => [...new Map([...current, next].map((item) => [item.id, item])).values()])),
+    ]).catch((cause: unknown) => setError(cause instanceof Error ? cause.message : String(cause)))
+    const timer = window.setInterval(() => void refreshActivity().catch(() => undefined), 15_000)
     return () => window.clearInterval(timer)
   }, [page, poolId, refreshActivity])
 
@@ -658,7 +678,7 @@ function App() {
     <div className="app-shell">
       <header>
         <button className="brand" onClick={() => setPage('swap')} aria-label="Inscrib3 app home"><img src="/logo.svg" alt="" /><span>INSCRIB3</span><small>APP</small></button>
-        <nav>{(['swap', 'pools', 'create', 'activity'] as const).map((item) => <button key={item} className={page === item ? 'active' : ''} onClick={() => { setPage(item); setError(''); if (item === 'pools') void refreshPools(); if (item === 'activity') void refreshActivity() }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}</nav>
+        <nav>{(['swap', 'pools', 'create', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') ? 'active' : ''} onClick={() => { setPage(item); setError(''); if (item === 'pools') void refreshPools(); if (item === 'activity') void refreshActivity() }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}</nav>
         <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span><button className="wallet-small" onClick={() => void connect()} disabled={busy}>{address ? short(address, 4) : 'Connect wallet'}</button></div>
       </header>
 
@@ -733,7 +753,7 @@ function App() {
               <div className="panel-head"><span>AUTOMATIC ROUTE</span><div className="panel-actions"><button className="share-link" onClick={() => void copySwapLink()}>{linkCopied ? 'Copied' : 'Copy link'}</button><button className="change-pair" onClick={openPairModal}>Change pair</button></div></div>
                <div className="pair"><div className="marks"><TokenMark label={sellTicker} /><TokenMark label={buyTicker} warm /></div><div><div className="pair-title-row"><h3>{pool?.name ?? 'No pool configured'}</h3>{pool?.onFire && <span className="fire-badge" title={`${pool.activity24h ?? 0} settled operations in the last 24 hours`}>🔥 On fire</span>}</div><p><i className={pool?.available ? 'online' : ''} /> {pool?.available ? 'Pool active' : 'Unavailable'} · {pool?.feeBps ?? 0} bps{pool?.onFire ? ` · ${pool.activity24h} actions / 24h` : ''}</p></div></div>
               <div className="pool-stats"><div><span>Base reserve</span><b>{pool?.baseReserve ? comma(pool.baseReserve) : '—'}</b></div><div><span>Quote reserve</span><b>{pool?.quoteReserve ? comma(pool.quoteReserve) : '—'}</b></div><div><span>LP supply</span><b>{pool?.lpSupply ? comma(pool.lpSupply) : '—'}</b></div></div>
-              <div className="pool-foot"><span>{pool?.protocolFeeBps ? 'Covenant fee vault active' : 'LP fees only'}</span><span>Up to {pool?.protocolFeeBps ? 3 : 4} swaps / sweep</span></div>
+              <div className="pool-foot"><span>{pool?.protocolFeeBps ? 'Covenant fee vault active' : 'LP fees only'}</span>{pool ? <button className="pool-detail-link" onClick={() => openPoolDetail(pool)}>Pool details →</button> : <span>Up to 3 swaps / sweep</span>}</div>
             </div>
 
             <div className="panel how-panel">
@@ -761,10 +781,52 @@ function App() {
               <div className="id-list"><div><span>Quote asset</span><code>{short(item.quoteAssetId, 10)}</code></div><div><span>LP asset</span><code>{short(item.lpAssetId, 10)}</code></div></div>
               {(item.baseAssetInfo?.controlled || item.quoteAssetInfo?.controlled) && <div className="pool-risk"><b>Controlled supply</b><span>{[item.baseAssetInfo, item.quoteAssetInfo].filter((info) => info?.controlled).map((info) => short(info!.controlAssetId ?? '', 8)).join(' · ')}</span></div>}
               {item.error && <p className="pool-error">{item.error}</p>}
-               <button className="secondary full" onClick={() => { replaceSwapUrl(item, item.baseAssetId); setPoolId(item.id); setSellAssetId(item.baseAssetId); setAmount(''); setReceiveAmount(''); setQuote(null); setPage('swap') }}>Trade this pool</button>
-            </article>
-          })}</div>}
-          {poolCursor && <button className="secondary load-more" onClick={() => void loadMorePools()}>Load more pools</button>}
+               <div className="pool-card-actions"><button className="secondary" onClick={() => openPoolDetail(item)}>View details</button><button className="secondary" onClick={() => { replaceSwapUrl(item, item.baseAssetId); setPoolId(item.id); setSellAssetId(item.baseAssetId); setAmount(''); setReceiveAmount(''); setQuote(null); setPage('swap') }}>Trade this pool</button></div>
+             </article>
+           })}</div>}
+           {poolCursor && <button className="secondary load-more" onClick={() => void loadMorePools()}>Load more pools</button>}
+        </section> : page === 'pool' ? <section className="view-page pool-detail-page">
+          {!pool ? <div className="empty-state">Pool not found.</div> : (() => {
+            const base = tokenDetails(pool.baseAssetId)
+            const quoteToken = tokenDetails(pool.quoteAssetId)
+            const baseReserve = BigInt(pool.baseReserve ?? '0')
+            const quoteReserve = BigInt(pool.quoteReserve ?? '0')
+            const quotePerBase = ratio(quoteReserve * 10n ** BigInt(base.decimals), baseReserve * 10n ** BigInt(quoteToken.decimals))
+            const basePerQuote = ratio(baseReserve * 10n ** BigInt(quoteToken.decimals), quoteReserve * 10n ** BigInt(base.decimals))
+            return <>
+              <div className="pool-detail-hero">
+                <button className="back-link" onClick={() => setPage('pools')}>← All pools</button>
+                <div className="pool-detail-title"><div className="marks"><TokenMark label={base.ticker} /><TokenMark label={quoteToken.ticker} warm /></div><div><span className="eyebrow"><i /> POOL DETAIL</span><h1>{pool.name}</h1><p><span className={pool.available ? 'live-dot' : 'offline-dot'} /> {pool.available ? 'Pool active' : 'Pool unavailable'} · {pool.feeBps} bps total fee</p></div></div>
+                <button className="primary compact" onClick={() => { replaceSwapUrl(pool, pool.baseAssetId); setSellAssetId(pool.baseAssetId); setAmount(''); setReceiveAmount(''); setQuote(null); setPage('swap') }}>Trade this pool</button>
+              </div>
+
+              <div className="metric-grid">
+                <div><span>{quoteToken.ticker} per {base.ticker}</span><b>{quotePerBase}</b><small>Spot price from current reserves</small></div>
+                <div><span>{base.ticker} per {quoteToken.ticker}</span><b>{basePerQuote}</b><small>Inverse spot price</small></div>
+                <div><span>24h activity</span><b>{pool.activity24h ?? 0}</b><small>{pool.swaps24h ?? 0} swaps · {pool.liquidityEvents24h ?? 0} liquidity</small></div>
+                <div><span>LP supply</span><b>{displayAmount(pool.lpSupply ?? '0', base.decimals, 8)}</b><small>{pool.lpAssetId ? short(pool.lpAssetId, 8) : '—'}</small></div>
+              </div>
+
+              <div className="detail-columns">
+                {([{ assetId: pool.baseAssetId, details: base, info: pool.baseAssetInfo, reserve: pool.baseReserve, warm: false }, { assetId: pool.quoteAssetId, details: quoteToken, info: pool.quoteAssetInfo, reserve: pool.quoteReserve, warm: true }] as const).map((token) => <article className="token-detail-card" key={token.assetId}>
+                  <div className="token-detail-head"><TokenMark label={token.details.ticker} warm={token.warm} /><div><h2>{token.details.name}</h2><span>{token.details.ticker}</span></div></div>
+                  <dl><div><dt>Pool reserve</dt><dd>{displayAmount(token.reserve ?? '0', token.details.decimals, 8)} {token.details.ticker}</dd></div>{(token.assetId === 'btc' || token.info?.supply) && <div><dt>Total supply</dt><dd>{token.assetId === 'btc' ? '21,000,000 BTC max' : displayAmount(token.info!.supply!, token.details.decimals, 8)}</dd></div>}<div><dt>Issuance</dt><dd>{token.info?.controlled ? 'Controlled / reissuable' : token.assetId === 'btc' ? 'Native Bitcoin' : 'No control asset'}</dd></div><div><dt>Asset ID</dt><dd><code title={token.assetId}>{short(token.assetId, 10)}</code></dd></div></dl>
+                </article>)}
+              </div>
+
+              <div className="activity-section-heading"><div><span className="eyebrow"><i /> LIVE FEED</span><h2>Pool activity</h2><p>Swap, liquidity additions and removals for this pool.</p></div><button className="secondary" onClick={() => void refreshActivity()}>Refresh</button></div>
+              <div className="activity-panel">
+                <div className="activity-head"><span>Type</span><span>Amount</span><span>Status</span><span>Transaction</span></div>
+                {activity.length === 0 ? <div className="empty-state">No activity for this pool yet.</div> : activity.map((item) => {
+                  const isSwap = item.activityType === 'swap'
+                  const sold = isSwap && item.sellAssetId ? tokenDetails(item.sellAssetId) : undefined
+                  const amountText = isSwap ? `${displayAmount(item.sellAmount ?? '0', sold?.decimals ?? 0)} ${sold?.ticker ?? 'ASSET'}` : item.activityType === 'deposit' ? `${displayAmount(item.baseAmount, base.decimals)} ${base.ticker} + ${displayAmount(item.quoteAmount, quoteToken.decimals)} ${quoteToken.ticker}` : `${displayAmount(item.lpAmount, base.decimals)} LP`
+                  return <div className="activity-row" key={`${item.activityType}-${item.id}`}><div><span className={`activity-icon ${item.activityType}`}>{isSwap ? '↔' : item.activityType === 'deposit' ? '+' : '−'}</span><div><b>{isSwap ? 'Swap' : item.activityType === 'deposit' ? 'Add liquidity' : 'Remove liquidity'}</b><small>{item.createdAt ? new Date(item.createdAt).toLocaleString() : short(item.id)}</small></div></div><code>{amountText}</code><span className={`status-pill ${item.status}`}>{item.status.replace('-', ' ')}</span><code title={item.settlementTxid ?? item.fundingTxid ?? ''}>{item.settlementTxid || item.fundingTxid ? short(item.settlementTxid ?? item.fundingTxid!, 7) : '—'}</code></div>
+                })}
+              </div>
+              {activityCursor && <button className="secondary load-more" onClick={() => void loadMoreActivity()}>Load more activity</button>}
+            </>
+          })()}
         </section> : page === 'create' ? <section className="view-page create-page">
           <div className="view-heading"><div><span className="eyebrow"><i /> PERMISSIONLESS ASSETS</span><h1>Create</h1><p>Issue an Arkade asset or open a covenant-enforced liquidity pool from your own wallet.</p></div></div>
           <div className="create-tabs"><button className={createMode === 'asset' ? 'active' : ''} onClick={() => { setCreateMode('asset'); setError(''); setCreationStep('') }}>Create asset</button><button className={createMode === 'pool' ? 'active' : ''} onClick={() => { setCreateMode('pool'); setError(''); setCreationStep('') }}>Create pool</button></div>
@@ -832,6 +894,7 @@ function App() {
               </div>
             })}
           </div>
+          {activityCursor && <button className="secondary load-more" onClick={() => void loadMoreActivity()}>Load more activity</button>}
         </section>}
       </main>
 
