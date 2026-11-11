@@ -295,6 +295,9 @@ function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals
   })
   const chartPoints = coordinates.map(({ x, y }) => `${x.toFixed(2)},${y.toFixed(2)}`).join(' ')
   const lastCoordinate = coordinates.at(-1)
+  const emptyMessage = timeframe === '30d'
+    ? 'No recorded price history for this pool yet.'
+    : 'No price updates in this timeframe. Try a longer range.'
 
   return <section className="price-chart">
     <div className="price-chart-head">
@@ -308,7 +311,7 @@ function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals
         {prices.length > 1 && <polygon points={`18,180 ${chartPoints} 582,180`} fill={`url(#price-fill-${pool.id})`} />}
         <polyline points={chartPoints} className="chart-line" />
         {lastCoordinate && <circle cx={lastCoordinate.x} cy={lastCoordinate.y} r="4" className="chart-last" />}
-      </svg> : <div className="chart-empty">{chartError || 'Price history starts with the next pool update.'}</div>}
+      </svg> : <div className="chart-empty">{chartError || emptyMessage}</div>}
     </div>
     <div className="price-chart-foot"><span>{series[0] ? formatChartTime(series[0].recordedAt, timeframe) : '—'}</span><span>Normalized using {baseTicker} ({baseDecimals}) and {quoteTicker} ({quoteDecimals}) decimals</span><span>{series.at(-1) ? formatChartTime(series.at(-1)!.recordedAt, timeframe) : '—'}</span></div>
   </section>
