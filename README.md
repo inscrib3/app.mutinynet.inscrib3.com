@@ -17,7 +17,6 @@ custodial deposit account.
 - Documentation: [docs.inscrib3.com](https://docs.inscrib3.com)
 - Wallet: [wallet.inscrib3.com](https://wallet.inscrib3.com)
 - Wallet source: [inscrib3/arkade-wallet](https://github.com/inscrib3/arkade-wallet)
-- Arkade AMM reference: [docs.arkadeos.com](https://docs.arkadeos.com/vaults/reference/automated-market-maker)
 
 ## What you can do
 

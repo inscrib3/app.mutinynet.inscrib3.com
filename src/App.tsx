@@ -1014,7 +1014,7 @@ function App() {
         </section>
       </div>}
 
-      <footer><button className="footer-brand" onClick={() => navigate('swap')}><img src="/logo.svg" alt="" /> INSCRIB3 / APP</button><span><i /> {NETWORK_LABEL} / experimental software</span><a href="https://docs.arkadeos.com/vaults/reference/automated-market-maker" target="_blank" rel="noreferrer">How the contracts work ↗</a></footer>
+      <footer><button className="footer-brand" onClick={() => navigate('swap')}><img src="/logo.svg" alt="" /> INSCRIB3 / APP</button><span><i /> {NETWORK_LABEL} / experimental software</span></footer>
     </div>
   )
 }
