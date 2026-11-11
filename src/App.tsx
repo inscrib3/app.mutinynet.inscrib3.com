@@ -81,6 +81,7 @@ interface Quote {
   protocolFeeBps: number
   lpFeeBps: number
   carrierFeeSats: string
+  rewardPoints: string
 }
 
 interface SwapRequest {
@@ -91,6 +92,7 @@ interface SwapRequest {
   sellAssetId?: string
   sellAmount?: string
   fundingSats: string
+  rewardPoints?: string
   fundingTxid?: string
   settlementTxid?: string
   error?: string
@@ -104,6 +106,8 @@ interface LiquidityRequest extends Omit<SwapRequest, 'fundingSats'> {
   lpAmount: string
 }
 type ActivityEvent = (SwapRequest & { activityType: 'swap' }) | (LiquidityRequest & { activityType: 'deposit' | 'withdraw' })
+interface PointsSummary { identityKey: string; total: string; poolPoints: string; swapPoints: string; rank?: number; participants: number; portableToMainnet: true }
+interface LeaderboardEntry { rank: number; identityKey: string; address: string; total: string; poolPoints: string; swapPoints: string }
 
 interface IssueAssetResult { arkTxId: string; assetId: string }
 interface PoolCreation {
@@ -351,6 +355,8 @@ function App() {
   const [poolCreation, setPoolCreation] = useState<PoolCreation | null>(null)
   const [creationStep, setCreationStep] = useState('')
   const [deployment, setDeployment] = useState<DeploymentInfo | null>(null)
+  const [points, setPoints] = useState<PointsSummary | null>(null)
+  const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([])
 
   const pool = pools.find((p) => p.id === poolId)
   const sellAsset = assets.find((a) => a.assetId === sellAssetId)
@@ -576,6 +582,15 @@ function App() {
     setActivity(result.items); setActivityCursor(result.nextCursor)
   }, [address, setActivity, setActivityCursor])
 
+  const refreshPoints = useCallback(async () => {
+    if (!address) return
+    const [summary, leaders] = await Promise.all([
+      api<PointsSummary>(`/v1/points?address=${encodeURIComponent(address)}`),
+      api<{ items: LeaderboardEntry[] }>('/v1/points/leaderboard?limit=5'),
+    ])
+    setPoints(summary); setLeaderboard(leaders.items)
+  }, [address])
+
   async function loadMoreActivity() {
     if (!activityCursor) return
     const path = page === 'activity'
@@ -678,6 +693,13 @@ function App() {
     return () => window.clearTimeout(timer)
   }, [toast])
 
+  useEffect(() => {
+    if (!address) return
+    const initial = window.setTimeout(() => void refreshPoints().catch(() => undefined), 0)
+    const refresh = window.setInterval(() => void refreshPoints().catch(() => undefined), 15_000)
+    return () => { window.clearTimeout(initial); window.clearInterval(refresh) }
+  }, [address, refreshPoints])
+
   const quoteRequestAmount = quoteMode === 'input' ? raw : receiveRaw
   useEffect(() => {
     if (!pool || !quoteRequestAmount || !sellAssetId || !buyAssetId || !pool.available) return
@@ -701,11 +723,11 @@ function App() {
     const timer = window.setInterval(() => {
       api<SwapRequest>(`/v1/swaps/${request.id}`).then((next) => {
         setRequest(next)
-        if (next.status === 'settled') { void refreshAssets(); void refreshPools() }
+        if (next.status === 'settled') { void refreshAssets(); void refreshPools(); void refreshPoints() }
       }).catch(() => undefined)
     }, 2500)
     return () => window.clearInterval(timer)
-  }, [request, refreshAssets, refreshPools])
+  }, [request, refreshAssets, refreshPools, refreshPoints])
 
   useEffect(() => {
     if (!liquidityRequest || ['settled', 'refunded', 'failed'].includes(liquidityRequest.status)) return
@@ -748,6 +770,7 @@ function App() {
       const [connected] = await window.arkade.connect()
       await assertWalletNetwork(window.arkade)
       const nextAddress = connected ?? await window.arkade.getAddress()
+      setPoints(null); setLeaderboard([])
       setAddress(nextAddress)
       const [nextAssets, nextBalance] = await Promise.all([window.arkade.getAssets(), window.arkade.getBalance()])
       assertProviderAmounts(nextAssets, nextBalance)
@@ -824,7 +847,7 @@ function App() {
       const fundingTxid = await window.arkade.sendAsset(creation.bootstrapAddress, fundingAssets, walletNumber(BigInt(creation.bootstrapSats), 'bootstrap satoshis'))
       setCreationStep('5/5 · Open the covenant pool')
       const opened = await api<PoolCreation>(`/v1/pool-creations/${encodeURIComponent(creation.id)}/open`, { method: 'POST', body: JSON.stringify({ fundingTxid }) })
-      setPoolCreation(opened); setCreationStep('Pool opened'); await Promise.all([refreshAssets(), refreshPools()])
+      setPoolCreation(opened); setCreationStep('Pool opened'); await Promise.all([refreshAssets(), refreshPools(), refreshPoints()])
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) }
     finally { setBusy(false) }
   }
@@ -900,7 +923,7 @@ function App() {
       <header>
         <button className="brand" onClick={() => navigate('swap')} aria-label="Inscrib3 app home"><img src="/logo.svg" alt="" /><span>INSCRIB3</span><small>APP</small></button>
         <nav>{(['swap', 'pools', 'create', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') void refreshPools() }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}</nav>
-        <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span><button className="wallet-small" onClick={() => void connect()} disabled={busy}>{address ? short(address, 4) : busy ? 'Loading wallet…' : 'Connect wallet'}</button></div>
+        <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span>{address && <button className="points-chip" onClick={() => navigate('activity')} title="Your portable points"><span>◆</span>{points ? comma(points.total) : '—'} PTS</button>}<button className="wallet-small" onClick={() => void connect()} disabled={busy}>{address ? short(address, 4) : busy ? 'Loading wallet…' : 'Connect wallet'}</button></div>
       </header>
 
       {toast && <div className="toast error-toast" role="alert"><span>{toast}</span><button type="button" onClick={() => setToast('')} aria-label="Dismiss notification">×</button></div>}
@@ -950,6 +973,7 @@ function App() {
               <div><span>Total fee</span><b>{(pool!.feeBps / 100).toFixed(2)}%</b></div>
               <div><span>LP fee</span><b>{((pool!.feeBps - pool!.protocolFeeBps) / 100).toFixed(2)}%</b></div>
               <div><span>Protocol fee</span><b>{(pool!.protocolFeeBps / 100).toFixed(2)}%</b></div>
+              <div><span>Points earned</span><b className="points-earned">+{comma(quote.rewardPoints ?? '1')} PTS</b></div>
               {BigInt(quote.carrierFeeSats) > 0n && <div><span>Carrier fee</span><b>{comma(quote.carrierFeeSats)} sats</b></div>}
               <div><span>Price impact</span><b className={quote.priceImpactBps > 300 ? 'danger' : 'positive'}>{(quote.priceImpactBps / 100).toFixed(2)}%</b></div>
               <div><span>Slippage protection</span><b>{(slippage / 100).toFixed(2)}%</b></div>
@@ -974,7 +998,7 @@ function App() {
               <button className="primary" onClick={() => void submitLiquidity()} disabled={busy || (!!address && (!liquidityRaw || !liquidityPreview || !pool?.available))}>{busy && <Spinner />}{!address ? 'Connect Inscrib3 Wallet' : !liquidityRaw ? 'Enter an amount' : mode === 'deposit' ? 'Fund liquidity deposit' : 'Fund LP withdrawal'}</button>
             </>}
             {error && <div className="notice error"><b>Transaction unavailable</b><span>{error}</span></div>}
-            {mode === 'swap' && request && <div className={`notice status ${request.status}`}><b>{request.status === 'settled' ? 'Swap complete' : request.status === 'funded' ? 'Swap funded' : request.status === 'failed' ? 'Swap failed' : request.status === 'refunded' ? 'Swap refunded' : 'Swap request created'}</b><span>{request.status === 'settled' ? `Settlement ${short(request.settlementTxid ?? '')}` : request.status === 'failed' ? request.error ?? 'The swap could not be completed.' : request.status === 'refunded' ? `Refund ${short(request.settlementTxid ?? '')}` : 'Waiting for the next pool sweep…'}</span><i /></div>}
+            {mode === 'swap' && request && <div className={`notice status ${request.status}`}><b>{request.status === 'settled' ? 'Swap complete' : request.status === 'funded' ? 'Swap funded' : request.status === 'failed' ? 'Swap failed' : request.status === 'refunded' ? 'Swap refunded' : 'Swap request created'}</b><span>{request.status === 'settled' ? `Settlement ${short(request.settlementTxid ?? '')} · +${request.rewardPoints ?? '1'} points` : request.status === 'failed' ? request.error ?? 'The swap could not be completed.' : request.status === 'refunded' ? `Refund ${short(request.settlementTxid ?? '')}` : `Waiting for the next pool sweep… · ${request.rewardPoints ?? '1'} points pending`}</span><i /></div>}
             {mode !== 'swap' && liquidityRequest && <div className={`notice status ${liquidityRequest.status}`}><b>{liquidityRequest.status === 'settled' ? 'Liquidity update complete' : liquidityRequest.status === 'funded' ? 'Request funded' : 'Liquidity request created'}</b><span>{liquidityRequest.status === 'settled' ? `Settlement ${short(liquidityRequest.settlementTxid ?? '')}` : 'Waiting for the next liquidity sweep…'}</span><i /></div>}
             {controlledPoolAssets.length > 0 && <div className="notice asset-risk"><b>Controlled asset supply</b><span>{controlledPoolAssets.map((info) => `${info.assetId === pool?.baseAssetId ? baseTicker : quoteTicker}: ${short(info.controlAssetId ?? '', 8)}`).join(' · ')}. Holders of these control assets may authorize additional issuance, which can affect pool value.</span></div>}
             <p className="security"><span>◇</span> Your wallet funds a covenant-bound request. The coordinator cannot redirect your payout.</p>
@@ -1103,14 +1127,20 @@ function App() {
               {controlledCreationAssets.length > 0 && <div className="notice asset-risk"><b>Reissuable asset warning</b><span>{controlledCreationAssets.map((asset) => `${asset.metadata?.ticker ?? short(asset.assetId)} · control ${short(asset.controlAssetId!, 8)}`).join(' · ')}. Additional supply may be issued by the control holder.</span></div>}
               <button className="primary" disabled={busy} onClick={() => void createPool()}>{busy && <Spinner />}{address ? 'Issue pool assets & open pool' : 'Connect Inscrib3 Wallet'}</button>
               {creationStep && <div className="creation-progress"><i className={poolCreation?.status === 'opened' ? 'done' : ''} /><span>{creationStep}</span></div>}
-              {poolCreation && <div className="result-box"><span>Status</span><b>{poolCreation.status}</b><span>Bootstrap covenant</span><code>{poolCreation.bootstrapAddress}</code>{poolCreation.openingTxid && <><span>Opening transaction</span><code>{poolCreation.openingTxid}</code></>}</div>}
+              {poolCreation && <div className="result-box"><span>Status</span><b>{poolCreation.status}</b>{poolCreation.status === 'opened' && <><span>Points earned</span><b className="points-earned">+10 PTS</b></>}<span>Bootstrap covenant</span><code>{poolCreation.bootstrapAddress}</code>{poolCreation.openingTxid && <><span>Opening transaction</span><code>{poolCreation.openingTxid}</code></>}</div>}
             </article>
             <aside className="create-info"><span className="panel-label">ONE ATOMIC FUNDING</span><h3>Permissionless, not custodial</h3><p>Inscrib3 issues the control, LP, and ledger assets, then funds liquidity, technical carriers, and the fixed creation fee in one bootstrap payment. The contract opens and distributes everything atomically.</p><ul><li>BTC remains native and unwrapped</li><li>The creation fee reaches the stable Treasury Vault</li><li>Protocol fee is at least 0.30% and below the total fee</li></ul></aside>
           </div>}
           {error && <div className="notice error create-error"><b>Creation unavailable</b><span>{error}</span></div>}
         </section> : <section className="view-page">
-          <div className="view-heading"><div><span className="eyebrow"><i /> WALLET HISTORY</span><h1>My activity</h1><p>All swaps, deposits, and withdrawals made by your connected wallet across the platform.</p></div>{address && <button className="secondary" onClick={() => void refreshWalletActivity()}>Refresh</button>}</div>
-          {!address ? <div className="empty-state activity-connect-state"><div className="activity-connect-icon">◇</div><h2>Connect your wallet</h2><p>Connect Inscrib3 Wallet to view your swaps and liquidity activity across every pool.</p><button className="secondary" onClick={() => void connect()}>Connect wallet</button></div> : <div className="activity-panel">
+          <div className="view-heading"><div><span className="eyebrow"><i /> WALLET HISTORY</span><h1>My activity</h1><p>Your portable score, swaps, deposits, and withdrawals across the platform.</p></div>{address && <button className="secondary" onClick={() => { void refreshWalletActivity(); void refreshPoints() }}>Refresh</button>}</div>
+          {!address ? <div className="empty-state activity-connect-state"><div className="activity-connect-icon">◇</div><h2>Connect your wallet</h2><p>Connect Inscrib3 Wallet to view your score and activity across every pool.</p><button className="secondary" onClick={() => void connect()}>Connect wallet</button></div> : <>
+          <div className="points-dashboard">
+            <section className="points-score-card"><span>YOUR SCORE</span><div><b>{points ? comma(points.total) : '—'}</b><em>PTS</em></div><p>{points?.rank ? `Rank #${points.rank} of ${points.participants}` : 'Complete an eligible action to enter the ranking'}</p><small>Bound to your wallet identity and portable to Mainnet.</small></section>
+            <section className="points-breakdown"><div><span>POOL CREATION</span><b>{points ? comma(points.poolPoints) : '—'}</b><small>10 points per opened pool</small></div><div><span>SWAPS</span><b>{points ? comma(points.swapPoints) : '—'}</b><small>At least 1 point · scales with protocol fee sats</small></div></section>
+            <section className="points-leaderboard"><div className="points-board-head"><span>TOP PLAYERS</span><small>LIVE</small></div>{leaderboard.length ? leaderboard.map((item) => <div className={item.identityKey === points?.identityKey ? 'current' : ''} key={item.identityKey}><i>#{item.rank}</i><code>{short(item.address, 5)}</code><b>{comma(item.total)} PTS</b></div>) : <p>No scores yet.</p>}</section>
+          </div>
+          <div className="activity-panel">
             <div className="activity-head"><span>Type</span><span>Amount</span><span>Status</span><span>Transaction</span></div>
             {activity.length === 0 ? <div className="empty-state">No activity for this wallet yet.</div> : activity.map((item) => {
               const isSwap = item.activityType === 'swap'
@@ -1129,7 +1159,7 @@ function App() {
                 <code title={item.settlementTxid ?? item.fundingTxid ?? ''}>{item.settlementTxid || item.fundingTxid ? short(item.settlementTxid ?? item.fundingTxid!, 7) : '—'}</code>
               </div>
             })}
-          </div>}
+          </div></>}
           {activityCursor && <button className="secondary load-more" onClick={() => void loadMoreActivity()}>Load more activity</button>}
         </section>}
       </main>
