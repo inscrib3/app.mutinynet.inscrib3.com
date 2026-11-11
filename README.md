@@ -30,9 +30,22 @@ custodial deposit account.
 - issue an Arkade asset directly from Inscrib3 Wallet;
 - create a permissionless pool from the browser;
 - inspect reserves, fees, recent activity, and controlled-supply warnings.
+- inspect decimal-normalized price charts from 1 minute through 30 days;
+- earn portable points for opened pools and settled swaps, and compete on the leaderboard.
 
 The busiest available pool can receive an **On fire** badge after at least three settled operations
 in a rolling 24-hour window. Closed historical pools are never promoted.
+
+## Points and Mainnet migration
+
+An opened pool earns 10 points. A settled swap earns at least one point and scales at one point per
+sat-equivalent of protocol fee where a BTC valuation is available. Awards are settlement-only and
+idempotent.
+
+Points are bound to the wallet's stable Taproot identity key rather than the network-specific address
+prefix. **Points earned during the Mutinynet release will be migrated to Mainnet** and remain
+attributable when the same wallet identity connects. See the
+[points documentation](https://docs.inscrib3.com/app/points).
 
 ## How custody works
 
