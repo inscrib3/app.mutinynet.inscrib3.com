@@ -237,7 +237,7 @@ function Spinner() { return <span className="spinner" aria-hidden="true" /> }
 const PRICE_TIMEFRAMES: PriceTimeframe[] = ['1m', '5m', '15m', '1h', '4h', '24h', '7d', '30d']
 
 function normalizedPrice(point: PricePoint, baseDecimals: number, quoteDecimals: number): number {
-  return (Number(point.quoteReserve) / Number(point.baseReserve)) * 10 ** (baseDecimals - quoteDecimals)
+  return (Number(point.baseReserve) / Number(point.quoteReserve)) * 10 ** (quoteDecimals - baseDecimals)
 }
 
 function formatPrice(value: number): string {
@@ -292,11 +292,11 @@ function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals
 
   return <section className="price-chart">
     <div className="price-chart-head">
-      <div><span>DISPLAY PRICE · DECIMALS APPLIED</span><div><h3>{quoteTicker} per {baseTicker}</h3>{latest !== undefined && <b>{formatPrice(latest)}</b>}<em className={change >= 0 ? 'positive' : 'negative'}>{change >= 0 ? '+' : ''}{change.toFixed(2)}%</em></div></div>
+      <div><span>DISPLAY PRICE · DECIMALS APPLIED</span><div><h3>{baseTicker} per {quoteTicker}</h3>{latest !== undefined && <b>{formatPrice(latest)}</b>}<em className={change >= 0 ? 'positive' : 'negative'}>{change >= 0 ? '+' : ''}{change.toFixed(2)}%</em></div></div>
       <div className="price-timeframes">{PRICE_TIMEFRAMES.map((value) => <button key={value} className={timeframe === value ? 'active' : ''} onClick={() => setTimeframe(value)}>{value.toUpperCase()}</button>)}</div>
     </div>
     <div className="price-chart-canvas">
-      {prices.length ? <svg viewBox="0 0 600 180" role="img" aria-label={`${quoteTicker} per ${baseTicker} price chart`} preserveAspectRatio="none">
+      {prices.length ? <svg viewBox="0 0 600 180" role="img" aria-label={`${baseTicker} per ${quoteTicker} price chart`} preserveAspectRatio="none">
         <defs><linearGradient id={`price-fill-${pool.id}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#34d399" stopOpacity=".24" /><stop offset="1" stopColor="#34d399" stopOpacity="0" /></linearGradient></defs>
         {[36, 72, 108, 144].map((y) => <line key={y} x1="0" x2="600" y1={y} y2={y} className="chart-grid" />)}
         {prices.length > 1 && <polygon points={`18,180 ${chartPoints} 582,180`} fill={`url(#price-fill-${pool.id})`} />}
