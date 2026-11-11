@@ -261,6 +261,7 @@ function App() {
   const [showSettings, setShowSettings] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState('')
+  const [toast, setToast] = useState('')
   const [request, setRequest] = useState<SwapRequest | null>(null)
   const [liquidityAmount, setLiquidityAmount] = useState('')
   const [liquidityRequest, setLiquidityRequest] = useState<LiquidityRequest | null>(null)
@@ -360,6 +361,10 @@ function App() {
   const filteredTokenIds = tokenIds.filter(matchesTokenSearch)
   const filteredModalBuyOptions = modalBuyOptions.filter(matchesTokenSearch)
   const filteredPools = [...poolResults].sort((a, b) => Number(Boolean(b.onFire)) - Number(Boolean(a.onFire)))
+  const onFirePool = pools.filter((item) => item.available && item.onFire)
+    .sort((a, b) => (b.activity24h ?? 0) - (a.activity24h ?? 0))[0]
+  const onFireBase = onFirePool ? tokenDetails(onFirePool.baseAssetId) : undefined
+  const onFireQuote = onFirePool ? tokenDetails(onFirePool.quoteAssetId) : undefined
 
   function bestPoolForPair(first: string, second: string): Pool | undefined {
     return pools.filter((item) => item.available && [item.baseAssetId, item.quoteAssetId].includes(first) && [item.baseAssetId, item.quoteAssetId].includes(second))
@@ -455,6 +460,12 @@ function App() {
     if (!next) return
     replaceSwapUrl(next, modalSellAssetId)
     setPoolId(next.id); setSellAssetId(modalSellAssetId); setAmount(''); setReceiveAmount(''); setQuote(null); setRequest(null); setError(''); setShowPairModal(false)
+  }
+
+  function switchToPool(target: Pool) {
+    replaceSwapUrl(target, target.baseAssetId)
+    setPoolId(target.id); setSellAssetId(target.baseAssetId); setMode('swap')
+    setAmount(''); setReceiveAmount(''); setQuote(null); setRequest(null); setLiquidityRequest(null); setError('')
   }
 
   function setMaxAmount() {
@@ -584,6 +595,12 @@ function App() {
     return () => { provider.off('accountChanged', refresh); provider.off('networkChanged', refresh) }
   }, [refreshAssets])
 
+  useEffect(() => {
+    if (!toast) return
+    const timer = window.setTimeout(() => setToast(''), 6_000)
+    return () => window.clearTimeout(timer)
+  }, [toast])
+
   const quoteRequestAmount = quoteMode === 'input' ? raw : receiveRaw
   useEffect(() => {
     if (!pool || !quoteRequestAmount || !sellAssetId || !buyAssetId || !pool.available) return
@@ -645,7 +662,7 @@ function App() {
     setError('')
     if (!window.arkade) {
       const message = 'Inscrib3 Wallet extension was not found.'
-      setError(message); window.alert(message); return
+      setError(message); setToast(message); return
     }
     setBusy(true)
     try {
@@ -660,7 +677,7 @@ function App() {
       setAssets(nextAssets); setBtcBalance(nextBalance.available)
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)
-      setError(message); window.alert(message)
+      setError(message); setToast(message)
     }
     finally { setBusy(false) }
   }
@@ -806,8 +823,10 @@ function App() {
       <header>
         <button className="brand" onClick={() => navigate('swap')} aria-label="Inscrib3 app home"><img src="/logo.svg" alt="" /><span>INSCRIB3</span><small>APP</small></button>
         <nav>{(['swap', 'pools', 'create', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') void refreshPools() }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}</nav>
-        <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span><button className="wallet-small" onClick={() => void connect()} disabled={busy}>{address ? short(address, 4) : 'Connect wallet'}</button></div>
+        <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span><button className="wallet-small" onClick={() => void connect()} disabled={busy}>{address ? short(address, 4) : busy ? 'Loading wallet…' : 'Connect wallet'}</button></div>
       </header>
+
+      {toast && <div className="toast error-toast" role="alert"><span>{toast}</span><button type="button" onClick={() => setToast('')} aria-label="Dismiss notification">×</button></div>}
 
       <main>
         {page === 'swap' ? <>
@@ -816,6 +835,13 @@ function App() {
           <h1>Native liquidity.<br /><em>Built on Bitcoin.</em></h1>
           <p>Swap BTC and Arkade assets through covenant-enforced liquidity. No bridges, no wrapped Bitcoin, no custody.</p>
         </section>
+
+        {onFirePool && onFireBase && onFireQuote && <section className="fire-route-banner">
+          <div className="fire-route-icon" aria-hidden="true">🔥</div>
+          <div className="marks"><TokenMark label={onFireBase.ticker} /><TokenMark label={onFireQuote.ticker} warm /></div>
+          <div className="fire-route-copy"><span>ON FIRE · TRENDING POOL</span><h2>{onFireBase.ticker} / {onFireQuote.ticker}</h2><p>{onFirePool.activity24h ?? 0} settled actions in the last 24 hours · {onFirePool.feeBps / 100}% total fee</p></div>
+          <button className="secondary" disabled={pool?.id === onFirePool.id && mode === 'swap'} onClick={() => switchToPool(onFirePool)}>{pool?.id === onFirePool.id && mode === 'swap' ? 'Active pair' : 'Switch to this pool'}</button>
+        </section>}
 
         <section className="workspace" id="swap">
           <div className="swap-card">
