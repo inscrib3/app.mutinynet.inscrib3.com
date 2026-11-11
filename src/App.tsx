@@ -260,12 +260,19 @@ function formatChartTime(timestamp: number, timeframe: PriceTimeframe): string {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
+function formatChartTooltipTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleString([], {
+    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
+}
+
 function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals }: {
   pool: Pool; baseTicker: string; quoteTicker: string; baseDecimals: number; quoteDecimals: number
 }) {
   const [timeframe, setTimeframe] = useState<PriceTimeframe>('4h')
   const [points, setPoints] = useState<PricePoint[]>([])
   const [chartError, setChartError] = useState('')
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
 
   useEffect(() => {
     const controller = new AbortController()
@@ -295,6 +302,8 @@ function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals
   })
   const chartPoints = coordinates.map(({ x, y }) => `${x.toFixed(2)},${y.toFixed(2)}`).join(' ')
   const lastCoordinate = coordinates.at(-1)
+  const hoveredCoordinate = hoveredIndex === null ? undefined : coordinates[hoveredIndex]
+  const hoveredPoint = hoveredIndex === null ? undefined : series[hoveredIndex]
   const emptyMessage = timeframe === '30d'
     ? 'No recorded price history for this pool yet.'
     : 'No price updates in this timeframe. Try a longer range.'
@@ -304,14 +313,36 @@ function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals
       <div><span>DISPLAY PRICE · DECIMALS APPLIED</span><div><h3>{baseTicker} per {quoteTicker}</h3>{latest !== undefined && <b>{formatPrice(latest)}</b>}<em className={change >= 0 ? 'positive' : 'negative'}>{change >= 0 ? '+' : ''}{change.toFixed(2)}%</em></div></div>
       <div className="price-timeframes">{PRICE_TIMEFRAMES.map((value) => <button key={value} className={timeframe === value ? 'active' : ''} onClick={() => setTimeframe(value)}>{value.toUpperCase()}</button>)}</div>
     </div>
-    <div className="price-chart-canvas">
+    <div className="price-chart-canvas" onPointerMove={(event) => {
+      if (!coordinates.length) return
+      const bounds = event.currentTarget.getBoundingClientRect()
+      const contentWidth = Math.max(bounds.width - 28, 1)
+      const chartX = Math.min(600, Math.max(0, ((event.clientX - bounds.left - 14) / contentWidth) * 600))
+      let nearest = 0
+      for (let index = 1; index < coordinates.length; index += 1) {
+        if (Math.abs(coordinates[index]!.x - chartX) < Math.abs(coordinates[nearest]!.x - chartX)) nearest = index
+      }
+      setHoveredIndex(nearest)
+    }} onPointerLeave={() => setHoveredIndex(null)}>
       {prices.length ? <svg viewBox="0 0 600 180" role="img" aria-label={`${baseTicker} per ${quoteTicker} price chart`} preserveAspectRatio="none">
         <defs><linearGradient id={`price-fill-${pool.id}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#34d399" stopOpacity=".24" /><stop offset="1" stopColor="#34d399" stopOpacity="0" /></linearGradient></defs>
         {[36, 72, 108, 144].map((y) => <line key={y} x1="0" x2="600" y1={y} y2={y} className="chart-grid" />)}
         {prices.length > 1 && <polygon points={`18,180 ${chartPoints} 582,180`} fill={`url(#price-fill-${pool.id})`} />}
         <polyline points={chartPoints} className="chart-line" />
-        {lastCoordinate && <circle cx={lastCoordinate.x} cy={lastCoordinate.y} r="4" className="chart-last" />}
       </svg> : <div className="chart-empty">{chartError || emptyMessage}</div>}
+      {prices.length > 0 && <div className="chart-overlay" aria-hidden="true">
+        {lastCoordinate && <span className="chart-marker chart-last" style={{ left: `${lastCoordinate.x / 6}%`, top: `${lastCoordinate.y / 1.8}%` }} />}
+        {hoveredCoordinate && hoveredPoint && <>
+          <span className="chart-hover-guide" style={{ left: `${hoveredCoordinate.x / 6}%` }} />
+          <span className="chart-marker chart-hover-marker" style={{ left: `${hoveredCoordinate.x / 6}%`, top: `${hoveredCoordinate.y / 1.8}%` }} />
+          <div className="chart-tooltip" style={{
+            left: `${hoveredCoordinate.x / 6}%`, top: `${hoveredCoordinate.y / 1.8}%`,
+            transform: hoveredCoordinate.x > 450
+              ? hoveredCoordinate.y < 60 ? 'translate(calc(-100% - 12px), 12px)' : 'translate(calc(-100% - 12px), calc(-100% - 10px))'
+              : hoveredCoordinate.y < 60 ? 'translate(12px, 12px)' : 'translate(12px, calc(-100% - 10px))',
+          }}><span>{baseTicker} per {quoteTicker}</span><b>{formatPrice(hoveredPoint.price)}</b><small>{formatChartTooltipTime(hoveredPoint.recordedAt)}</small></div>
+        </>}
+      </div>}
     </div>
     <div className="price-chart-foot"><span>{series[0] ? formatChartTime(series[0].recordedAt, timeframe) : '—'}</span><span>Normalized using {baseTicker} ({baseDecimals}) and {quoteTicker} ({quoteDecimals}) decimals</span><span>{series.at(-1) ? formatChartTime(series.at(-1)!.recordedAt, timeframe) : '—'}</span></div>
   </section>
