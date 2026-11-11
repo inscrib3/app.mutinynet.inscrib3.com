@@ -243,7 +243,7 @@ function normalizedPrice(point: PricePoint, baseDecimals: number, quoteDecimals:
 function formatPrice(value: number): string {
   if (!Number.isFinite(value)) return '—'
   if (value === 0) return '0'
-  if (Math.abs(value) >= 1_000_000 || Math.abs(value) < 0.000001) return value.toExponential(6)
+  if (Math.abs(value) < 0.00000001) return value.toExponential(6)
   return value.toLocaleString(undefined, { maximumSignificantDigits: 10 })
 }
 
