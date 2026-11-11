@@ -41,6 +41,9 @@ interface AssetRisk { assetId: string; controlled: boolean; controlAssetId?: str
 interface CatalogAsset { assetId: string; controlAssetId?: string; supply?: string; metadata?: { name?: string; ticker?: string; decimals?: number; icon?: string } }
 interface PageResult<T> { items: T[]; total: number; nextCursor?: string }
 interface CursorPage<T> { items: T[]; nextCursor?: string }
+type PriceTimeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '24h' | '7d' | '30d'
+interface PricePoint { recordedAt: number; baseReserve: string; quoteReserve: string; txid: string }
+interface PriceHistory { poolId: string; timeframe: PriceTimeframe; baseAssetId: string; quoteAssetId: string; priceUnit: 'raw-reserves'; points: PricePoint[] }
 
 interface BalanceInfo { available: number; total: number }
 
@@ -231,6 +234,80 @@ function TokenMark({ label, warm = false }: { label: string; warm?: boolean }) {
 
 function Spinner() { return <span className="spinner" aria-hidden="true" /> }
 
+const PRICE_TIMEFRAMES: PriceTimeframe[] = ['1m', '5m', '15m', '1h', '4h', '24h', '7d', '30d']
+
+function normalizedPrice(point: PricePoint, baseDecimals: number, quoteDecimals: number): number {
+  return (Number(point.quoteReserve) / Number(point.baseReserve)) * 10 ** (baseDecimals - quoteDecimals)
+}
+
+function formatPrice(value: number): string {
+  if (!Number.isFinite(value)) return '—'
+  if (value === 0) return '0'
+  if (Math.abs(value) >= 1_000_000 || Math.abs(value) < 0.000001) return value.toExponential(6)
+  return value.toLocaleString(undefined, { maximumSignificantDigits: 10 })
+}
+
+function formatChartTime(timestamp: number, timeframe: PriceTimeframe): string {
+  const date = new Date(timestamp)
+  if (timeframe === '1m' || timeframe === '5m') return date.toLocaleTimeString([], { minute: '2-digit', second: '2-digit' })
+  if (timeframe === '7d' || timeframe === '30d') return date.toLocaleDateString([], { month: 'short', day: 'numeric' })
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals }: {
+  pool: Pool; baseTicker: string; quoteTicker: string; baseDecimals: number; quoteDecimals: number
+}) {
+  const [timeframe, setTimeframe] = useState<PriceTimeframe>('15m')
+  const [points, setPoints] = useState<PricePoint[]>([])
+  const [chartError, setChartError] = useState('')
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const load = () => api<PriceHistory>(`/v1/pools/${encodeURIComponent(pool.id)}/prices?timeframe=${timeframe}`, { signal: controller.signal })
+      .then((history) => { setPoints(history.points); setChartError('') })
+      .catch((cause: unknown) => { if ((cause as Error).name !== 'AbortError') setChartError(cause instanceof Error ? cause.message : String(cause)) })
+    void load()
+    const refresh = window.setInterval(() => void load(), 15_000)
+    return () => { controller.abort(); window.clearInterval(refresh) }
+  }, [pool.id, timeframe])
+
+  const series = points.map((point) => ({ ...point, price: normalizedPrice(point, baseDecimals, quoteDecimals) }))
+    .filter((point) => Number.isFinite(point.price))
+  const prices = series.map((point) => point.price)
+  const latest = prices.at(-1)
+  const first = prices[0]
+  const change = first && latest !== undefined ? ((latest - first) / first) * 100 : 0
+  const min = prices.length ? Math.min(...prices) : 0
+  const max = prices.length ? Math.max(...prices) : 0
+  const spread = max - min || Math.max(Math.abs(max) * 0.02, 1e-12)
+  const firstTime = series[0]?.recordedAt ?? 0
+  const lastTime = series.at(-1)?.recordedAt ?? firstTime
+  const coordinates = series.map((point) => {
+    const x = firstTime === lastTime ? 300 : 18 + ((point.recordedAt - firstTime) / (lastTime - firstTime)) * 564
+    const y = 162 - ((point.price - (min - spread * 0.08)) / (spread * 1.16)) * 144
+    return { x, y }
+  })
+  const chartPoints = coordinates.map(({ x, y }) => `${x.toFixed(2)},${y.toFixed(2)}`).join(' ')
+  const lastCoordinate = coordinates.at(-1)
+
+  return <section className="price-chart">
+    <div className="price-chart-head">
+      <div><span>DISPLAY PRICE · DECIMALS APPLIED</span><div><h3>{quoteTicker} per {baseTicker}</h3>{latest !== undefined && <b>{formatPrice(latest)}</b>}<em className={change >= 0 ? 'positive' : 'negative'}>{change >= 0 ? '+' : ''}{change.toFixed(2)}%</em></div></div>
+      <div className="price-timeframes">{PRICE_TIMEFRAMES.map((value) => <button key={value} className={timeframe === value ? 'active' : ''} onClick={() => setTimeframe(value)}>{value.toUpperCase()}</button>)}</div>
+    </div>
+    <div className="price-chart-canvas">
+      {prices.length ? <svg viewBox="0 0 600 180" role="img" aria-label={`${quoteTicker} per ${baseTicker} price chart`} preserveAspectRatio="none">
+        <defs><linearGradient id={`price-fill-${pool.id}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#34d399" stopOpacity=".24" /><stop offset="1" stopColor="#34d399" stopOpacity="0" /></linearGradient></defs>
+        {[36, 72, 108, 144].map((y) => <line key={y} x1="0" x2="600" y1={y} y2={y} className="chart-grid" />)}
+        {prices.length > 1 && <polygon points={`18,180 ${chartPoints} 582,180`} fill={`url(#price-fill-${pool.id})`} />}
+        <polyline points={chartPoints} className="chart-line" />
+        {lastCoordinate && <circle cx={lastCoordinate.x} cy={lastCoordinate.y} r="4" className="chart-last" />}
+      </svg> : <div className="chart-empty">{chartError || 'Price history starts with the next pool update.'}</div>}
+    </div>
+    <div className="price-chart-foot"><span>{series[0] ? formatChartTime(series[0].recordedAt, timeframe) : '—'}</span><span>Normalized using {baseTicker} ({baseDecimals}) and {quoteTicker} ({quoteDecimals}) decimals</span><span>{series.at(-1) ? formatChartTime(series.at(-1)!.recordedAt, timeframe) : '—'}</span></div>
+  </section>
+}
+
 function App() {
   const initialRoute = routeFromLocation()
   const initialParams = new URLSearchParams(window.location.search)
@@ -245,7 +322,7 @@ function App() {
   const [address, setAddress] = useState('')
   const [assets, setAssets] = useState<AssetInfo[]>([])
   const [btcBalance, setBtcBalance] = useState(0)
-  const [sellAssetId, setSellAssetId] = useState('')
+  const [sellAssetId, setSellAssetId] = useState('btc')
   const [amount, setAmount] = useState('')
   const [receiveAmount, setReceiveAmount] = useState('')
   const [quoteMode, setQuoteMode] = useState<'input' | 'output'>('input')
@@ -282,7 +359,7 @@ function App() {
   const sellDecimals = sellAsset?.metadata?.decimals ?? (sellAssetId === 'btc' ? 8 : 0)
   const buyDecimals = buyAsset?.metadata?.decimals ?? (buyAssetId === 'btc' ? 8 : 0)
   const sellTicker = sellAssetId === 'btc' ? 'BTC' : sellAsset?.metadata?.ticker ?? (pool?.name.split('/')[sellAssetId === pool?.quoteAssetId ? 1 : 0]?.trim() || 'ASSET')
-  const buyTicker = buyAssetId === 'btc' ? 'BTC' : buyAsset?.metadata?.ticker ?? (pool?.name.split('/')[buyAssetId === pool?.quoteAssetId ? 1 : 0]?.trim() || 'ASSET')
+  const buyTicker = !buyAssetId ? 'SELECT' : buyAssetId === 'btc' ? 'BTC' : buyAsset?.metadata?.ticker ?? (pool?.name.split('/')[buyAssetId === pool?.quoteAssetId ? 1 : 0]?.trim() || 'ASSET')
   const raw = rawAmount(amount, sellDecimals)
   const receiveRaw = rawAmount(receiveAmount, buyDecimals)
   const baseAsset = assets.find((asset) => asset.assetId === pool?.baseAssetId)
@@ -541,7 +618,7 @@ function App() {
       const linked = params.get('swap') ? page.items.find((item) => item.id === params.get('swap') && item.available) : undefined
       const requestedPoolId = route.poolId
       const routed = requestedPoolId ? page.items.find((item) => item.id === requestedPoolId) : undefined
-      const first = linked ?? routed ?? (!requestedPoolId ? page.items.find((p) => p.available && p.protocolFeeBps > 0) ?? page.items.find((p) => p.available) ?? page.items[0] : undefined)
+      const first = linked ?? routed
       if (first) {
         setPoolId(first.id)
         setSellAssetId(linked && params.get('side') === 'quote' ? first.quoteAssetId : first.baseAssetId)
@@ -814,7 +891,7 @@ function App() {
 
   const balance = sellAssetId === 'btc' ? displayAmount(BigInt(btcBalance), 8, 8) : sellAsset ? displayAmount(BigInt(sellAsset.amount), sellDecimals, 4) : '0'
   const hasQuoteAmount = quoteMode === 'input' ? raw : receiveRaw
-  const buttonText = !address ? 'Connect Inscrib3 Wallet' : !pool?.available ? 'Pool unavailable' : !hasQuoteAmount ? 'Enter an amount' : !quote ? 'Finding best price…' : 'Review & swap'
+  const buttonText = !address ? 'Connect Inscrib3 Wallet' : !pool ? 'Select a token pair' : !pool.available ? 'Pool unavailable' : !hasQuoteAmount ? 'Enter an amount' : !quote ? 'Finding best price…' : 'Review & swap'
   const baseTicker = pool?.baseAssetId === 'btc' ? 'BTC' : baseAsset?.metadata?.ticker ?? pool?.baseAssetInfo?.metadata?.ticker ?? 'BASE'
   const quoteTicker = pool?.quoteAssetId === 'btc' ? 'BTC' : quoteAsset?.metadata?.ticker ?? pool?.quoteAssetInfo?.metadata?.ticker ?? 'QUOTE'
 
@@ -842,6 +919,8 @@ function App() {
           <div className="fire-route-copy"><span>ON FIRE · TRENDING POOL</span><h2>{onFireBase.ticker} / {onFireQuote.ticker}</h2><p>{onFirePool.activity24h ?? 0} settled actions in the last 24 hours · {onFirePool.feeBps / 100}% total fee</p></div>
           <button className="secondary" disabled={pool?.id === onFirePool.id && mode === 'swap'} onClick={() => switchToPool(onFirePool)}>{pool?.id === onFirePool.id && mode === 'swap' ? 'Active pair' : 'Switch to this pool'}</button>
         </section>}
+
+        {pool?.available && <PriceChart key={`swap-${pool.id}`} pool={pool} baseTicker={baseTicker} quoteTicker={quoteTicker} baseDecimals={baseDecimals} quoteDecimals={quoteDecimals} />}
 
         <section className="workspace" id="swap">
           <div className="swap-card">
@@ -960,6 +1039,8 @@ function App() {
                 <div><span>LP supply</span><b>{displayAmount(pool.lpSupply ?? '0', base.decimals, 8)}</b><small>{pool.lpAssetId ? short(pool.lpAssetId, 8) : '—'}</small></div>
               </div>
 
+              <PriceChart key={`detail-${pool.id}`} pool={pool} baseTicker={base.ticker} quoteTicker={quoteToken.ticker} baseDecimals={base.decimals} quoteDecimals={quoteToken.decimals} />
+
               <div className="detail-columns">
                 {([{ assetId: pool.baseAssetId, details: base, info: pool.baseAssetInfo, reserve: pool.baseReserve, warm: false }, { assetId: pool.quoteAssetId, details: quoteToken, info: pool.quoteAssetInfo, reserve: pool.quoteReserve, warm: true }] as const).map((token) => <article className="token-detail-card" key={token.assetId}>
                   <div className="token-detail-head"><TokenMark label={token.details.ticker} warm={token.warm} /><div><h2>{token.details.name}</h2><span>{token.details.ticker}</span></div></div>
@@ -1029,7 +1110,7 @@ function App() {
           {error && <div className="notice error create-error"><b>Creation unavailable</b><span>{error}</span></div>}
         </section> : <section className="view-page">
           <div className="view-heading"><div><span className="eyebrow"><i /> WALLET HISTORY</span><h1>My activity</h1><p>All swaps, deposits, and withdrawals made by your connected wallet across the platform.</p></div>{address && <button className="secondary" onClick={() => void refreshWalletActivity()}>Refresh</button>}</div>
-          {!address ? <div className="empty-state">Connect Inscrib3 Wallet to view your activity.<br /><button className="secondary" onClick={() => void connect()}>Connect wallet</button></div> : <div className="activity-panel">
+          {!address ? <div className="empty-state activity-connect-state"><div className="activity-connect-icon">◇</div><h2>Connect your wallet</h2><p>Connect Inscrib3 Wallet to view your swaps and liquidity activity across every pool.</p><button className="secondary" onClick={() => void connect()}>Connect wallet</button></div> : <div className="activity-panel">
             <div className="activity-head"><span>Type</span><span>Amount</span><span>Status</span><span>Transaction</span></div>
             {activity.length === 0 ? <div className="empty-state">No activity for this wallet yet.</div> : activity.map((item) => {
               const isSwap = item.activityType === 'swap'
