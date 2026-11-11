@@ -263,7 +263,7 @@ function formatChartTime(timestamp: number, timeframe: PriceTimeframe): string {
 function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals }: {
   pool: Pool; baseTicker: string; quoteTicker: string; baseDecimals: number; quoteDecimals: number
 }) {
-  const [timeframe, setTimeframe] = useState<PriceTimeframe>('15m')
+  const [timeframe, setTimeframe] = useState<PriceTimeframe>('4h')
   const [points, setPoints] = useState<PricePoint[]>([])
   const [chartError, setChartError] = useState('')
 
@@ -367,17 +367,19 @@ function App() {
   const sellAsset = assets.find((a) => a.assetId === sellAssetId)
   const buyAssetId = pool ? (sellAssetId === pool.baseAssetId ? pool.quoteAssetId : pool.baseAssetId) : ''
   const buyAsset = assets.find((a) => a.assetId === buyAssetId)
-  const sellDecimals = sellAsset?.metadata?.decimals ?? (sellAssetId === 'btc' ? 8 : 0)
-  const buyDecimals = buyAsset?.metadata?.decimals ?? (buyAssetId === 'btc' ? 8 : 0)
-  const sellTicker = sellAssetId === 'btc' ? 'BTC' : sellAsset?.metadata?.ticker ?? (pool?.name.split('/')[sellAssetId === pool?.quoteAssetId ? 1 : 0]?.trim() || 'ASSET')
-  const buyTicker = !buyAssetId ? 'SELECT' : buyAssetId === 'btc' ? 'BTC' : buyAsset?.metadata?.ticker ?? (pool?.name.split('/')[buyAssetId === pool?.quoteAssetId ? 1 : 0]?.trim() || 'ASSET')
+  const sellPoolInfo = pool?.baseAssetId === sellAssetId ? pool.baseAssetInfo : pool?.quoteAssetId === sellAssetId ? pool.quoteAssetInfo : undefined
+  const buyPoolInfo = pool?.baseAssetId === buyAssetId ? pool.baseAssetInfo : pool?.quoteAssetId === buyAssetId ? pool.quoteAssetInfo : undefined
+  const sellDecimals = sellAsset?.metadata?.decimals ?? sellPoolInfo?.metadata?.decimals ?? (sellAssetId === 'btc' ? 8 : 0)
+  const buyDecimals = buyAsset?.metadata?.decimals ?? buyPoolInfo?.metadata?.decimals ?? (buyAssetId === 'btc' ? 8 : 0)
+  const sellTicker = sellAssetId === 'btc' ? 'BTC' : sellAsset?.metadata?.ticker ?? sellPoolInfo?.metadata?.ticker ?? (pool?.name.split('/')[sellAssetId === pool?.quoteAssetId ? 1 : 0]?.trim() || 'ASSET')
+  const buyTicker = !buyAssetId ? 'SELECT' : buyAssetId === 'btc' ? 'BTC' : buyAsset?.metadata?.ticker ?? buyPoolInfo?.metadata?.ticker ?? (pool?.name.split('/')[buyAssetId === pool?.quoteAssetId ? 1 : 0]?.trim() || 'ASSET')
   const raw = rawAmount(amount, sellDecimals)
   const receiveRaw = rawAmount(receiveAmount, buyDecimals)
   const baseAsset = assets.find((asset) => asset.assetId === pool?.baseAssetId)
   const quoteAsset = assets.find((asset) => asset.assetId === pool?.quoteAssetId)
   const lpAsset = assets.find((asset) => asset.assetId === pool?.lpAssetId)
-  const baseDecimals = baseAsset?.metadata?.decimals ?? (pool?.baseAssetId === 'btc' ? 8 : 0)
-  const quoteDecimals = quoteAsset?.metadata?.decimals ?? (pool?.quoteAssetId === 'btc' ? 8 : 0)
+  const baseDecimals = baseAsset?.metadata?.decimals ?? pool?.baseAssetInfo?.metadata?.decimals ?? (pool?.baseAssetId === 'btc' ? 8 : 0)
+  const quoteDecimals = quoteAsset?.metadata?.decimals ?? pool?.quoteAssetInfo?.metadata?.decimals ?? (pool?.quoteAssetId === 'btc' ? 8 : 0)
   const lpDecimals = lpAsset?.metadata?.decimals ?? baseDecimals
   const liquidityRaw = rawAmount(liquidityAmount, mode === 'withdraw' ? lpDecimals : baseDecimals)
   const liquidityPreview = (() => {
