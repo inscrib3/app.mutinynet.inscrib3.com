@@ -26,6 +26,9 @@ interface DeploymentInfo {
   network: 'mutinynet' | 'mainnet'
   platformTreasuryAddress: string
   poolCreationFeeSats: string
+  ammContractGeneration: 'amm-v2'
+  maxSwapBatch: number
+  maxLiquidityBatch: number
 }
 
 interface NetworkInfo {
@@ -76,6 +79,11 @@ interface Pool {
   liquidityEvents24h?: number
   activity24h?: number
   onFire?: boolean
+  contractGeneration: 'amm-v1' | 'amm-v2'
+  lifecycle: 'active' | 'withdraw-only' | 'closed'
+  swapEnabled: boolean
+  depositEnabled: boolean
+  withdrawalEnabled: boolean
 }
 
 interface Quote {
@@ -560,7 +568,9 @@ function App() {
     const baseTicker = baseAssetId ? tokenDetails(baseAssetId).ticker : ''
     const quoteTicker = quoteAssetId ? tokenDetails(quoteAssetId).ticker : ''
     const name = baseTicker && quoteTicker ? `${baseTicker} / ${quoteTicker}` : ''
-    const id = baseTicker && quoteTicker ? poolSlug(baseTicker, quoteTicker) : ''
+    const legacyPair = pools.some((item) => item.lifecycle !== 'active' && [item.baseAssetId, item.quoteAssetId].includes(baseAssetId)
+      && [item.baseAssetId, item.quoteAssetId].includes(quoteAssetId))
+    const id = baseTicker && quoteTicker ? `${poolSlug(baseTicker, quoteTicker)}${legacyPair ? '-v2' : ''}` : ''
     setPoolForm((current) => ({ ...current, baseAssetId, quoteAssetId, id, name }))
   }
 
@@ -568,7 +578,7 @@ function App() {
   const creationQuoteDetails = poolForm.quoteAssetId ? tokenDetails(poolForm.quoteAssetId) : undefined
   const creationBaseAmount = creationBaseDetails ? rawAmount(poolForm.baseAmount, creationBaseDetails.decimals) : null
   const creationQuoteAmount = creationQuoteDetails ? rawAmount(poolForm.quoteAmount, creationQuoteDetails.decimals) : null
-  const existingPair = poolForm.quoteAssetId ? pools.find((item) => [item.baseAssetId, item.quoteAssetId].includes(poolForm.baseAssetId)
+  const existingPair = poolForm.quoteAssetId ? pools.find((item) => item.lifecycle === 'active' && [item.baseAssetId, item.quoteAssetId].includes(poolForm.baseAssetId)
     && [item.baseAssetId, item.quoteAssetId].includes(poolForm.quoteAssetId)) : undefined
   const poolValidation = validatePoolForm(poolForm, {
     base: creationBaseDetails && { ticker: creationBaseDetails.ticker, decimals: creationBaseDetails.decimals, balance: walletBalance(poolForm.baseAssetId) },
@@ -1041,7 +1051,7 @@ function App() {
       await assertWalletNetwork(window.arkade)
       setCreationStep('Checking pair availability')
       const candidates = await api<PageResult<Pool>>(`/v1/pools?assetId=${encodeURIComponent(poolForm.baseAssetId)}&limit=100`)
-      const duplicate = candidates.items.find((candidate) => [candidate.baseAssetId, candidate.quoteAssetId].includes(poolForm.baseAssetId)
+      const duplicate = candidates.items.find((candidate) => candidate.lifecycle === 'active' && [candidate.baseAssetId, candidate.quoteAssetId].includes(poolForm.baseAssetId)
         && [candidate.baseAssetId, candidate.quoteAssetId].includes(poolForm.quoteAssetId))
       if (duplicate) throw new Error(`A pool already exists for this pair (${duplicate.name}).`)
       const stem = poolForm.name.toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 9) || 'POOL'
@@ -1207,6 +1217,7 @@ function App() {
     if (request && swapLocked) return request.status === 'failed' ? 'Dismiss the failed swap to retry' : 'Swap in progress…'
     if (!pool) return 'Select a token pair'
     if (!pool.available) return 'Pool unavailable'
+    if (!pool.swapEnabled) return 'Legacy pool · swaps disabled during migration'
     const typedAmount = quoteMode === 'input' ? sellAmountCheck : parseDisplayAmount(receiveAmount, buyDecimals)
     if ('error' in typedAmount) return typedAmount.error
     if (raw && raw > walletBalance(sellAssetId)) return `Insufficient ${sellTicker} balance`
@@ -1224,6 +1235,8 @@ function App() {
     if (!paymentsRestored) return 'Checking unfinished payments…'
     if (liquidityRequest && liquidityLocked) return liquidityRequest.status === 'failed' ? 'Dismiss the failed request to retry' : 'Request in progress…'
     if (!pool?.available) return 'Pool unavailable'
+    if (mode === 'deposit' && !pool.depositEnabled) return 'Legacy pool · deposits disabled during migration'
+    if (mode === 'withdraw' && !pool.withdrawalEnabled) return 'Withdrawals unavailable'
     const typedAmount = parseDisplayAmount(liquidityAmount, mode === 'withdraw' ? lpDecimals : baseDecimals)
     if ('error' in typedAmount) return typedAmount.error
     if (!liquidityPreview) return 'Pool reserves unavailable'
@@ -1344,14 +1357,14 @@ function App() {
           <aside>
             <div className="panel pool-panel" id="pools">
               <div className="panel-head"><span>AUTOMATIC ROUTE</span><div className="panel-actions"><button className="share-link" onClick={() => void copySwapLink()}>{linkCopied ? 'Copied' : 'Copy link'}</button><button className="change-pair" onClick={openPairModal}>Change pair</button></div></div>
-               <div className="pair"><div className="marks"><TokenMark label={sellTicker} /><TokenMark label={buyTicker} warm /></div><div><div className="pair-title-row"><h3>{pool?.name ?? 'No pool configured'}</h3>{pool?.onFire && <span className="fire-badge" title={`${pool.activity24h ?? 0} settled operations in the last 24 hours`}>🔥 On fire</span>}</div><p><i className={pool?.available ? 'online' : ''} /> {pool?.available ? 'Pool active' : 'Unavailable'} · {pool?.feeBps ?? 0} bps{pool?.onFire ? ` · ${pool.activity24h} actions / 24h` : ''}</p></div></div>
+               <div className="pair"><div className="marks"><TokenMark label={sellTicker} /><TokenMark label={buyTicker} warm /></div><div><div className="pair-title-row"><h3>{pool?.name ?? 'No pool configured'}</h3>{pool?.lifecycle === 'withdraw-only' && <span className="fire-badge">Legacy · withdraw only</span>}{pool?.onFire && <span className="fire-badge" title={`${pool.activity24h ?? 0} settled operations in the last 24 hours`}>🔥 On fire</span>}</div><p><i className={pool?.available ? 'online' : ''} /> {pool?.available ? 'Pool readable' : 'Unavailable'} · {pool?.feeBps ?? 0} bps{pool?.onFire ? ` · ${pool.activity24h} actions / 24h` : ''}</p></div></div>
               <div className="pool-stats"><div><span>Base reserve</span><b>{pool?.baseReserve ? comma(pool.baseReserve) : '—'}</b></div><div><span>Quote reserve</span><b>{pool?.quoteReserve ? comma(pool.quoteReserve) : '—'}</b></div><div><span>LP supply</span><b>{pool?.lpSupply ? comma(pool.lpSupply) : '—'}</b></div></div>
-              <div className="pool-foot"><span>{pool?.protocolFeeBps ? 'Covenant fee vault active' : 'LP fees only'}</span>{pool ? <button className="pool-detail-link" onClick={() => openPoolDetail(pool)}>Pool details →</button> : <span>Up to 3 swaps / sweep</span>}</div>
+              <div className="pool-foot"><span>{pool?.protocolFeeBps ? 'Covenant fee vault active' : 'LP fees only'}</span>{pool ? <button className="pool-detail-link" onClick={() => openPoolDetail(pool)}>Pool details →</button> : <span>Up to {deployment?.maxSwapBatch ?? 16} swaps / sweep</span>}</div>
             </div>
 
             <div className="panel how-panel">
               <span className="panel-label">HOW IT WORKS</span>
-              <ol><li><b>1</b><div><strong>Fund a standing swap</strong><span>Your assets enter a payout-bound contract.</span></div></li><li><b>2</b><div><strong>Requests are batched</strong><span>Up to four swaps update the pool atomically.</span></div></li><li><b>3</b><div><strong>Receive automatically</strong><span>The bought asset lands directly in your wallet.</span></div></li></ol>
+              <ol><li><b>1</b><div><strong>Fund a standing swap</strong><span>Your assets enter a payout-bound contract.</span></div></li><li><b>2</b><div><strong>Requests are batched</strong><span>Up to {deployment?.maxSwapBatch ?? 16} swaps update the pool atomically.</span></div></li><li><b>3</b><div><strong>Receive automatically</strong><span>The bought asset lands directly in your wallet.</span></div></li></ol>
               <a className="panel-doc-link" href="https://docs.inscrib3.com/app/swaps" target="_blank" rel="noreferrer">Read the swap guide ↗</a>
             </div>
           </aside>
@@ -1390,8 +1403,8 @@ function App() {
             return <>
               <div className="pool-detail-hero">
                 <button className="back-link" onClick={() => navigate('pools')}>← All pools</button>
-                <div className="pool-detail-title"><div className="marks"><TokenMark label={base.ticker} /><TokenMark label={quoteToken.ticker} warm /></div><div><span className="eyebrow"><i /> POOL DETAIL</span><div className="pool-title-row"><h1>{pool.name}</h1>{pool.onFire && <span className="fire-badge" title={`${pool.activity24h ?? 0} settled operations in the last 24 hours`}>🔥 On fire</span>}</div><p><span className={pool.available ? 'live-dot' : 'offline-dot'} /> {pool.available ? 'Pool active' : 'Pool unavailable'} · {pool.feeBps} bps total fee</p></div></div>
-                <button className="primary compact" onClick={() => switchToPool(pool, 'push')}>Trade this pool</button>
+                <div className="pool-detail-title"><div className="marks"><TokenMark label={base.ticker} /><TokenMark label={quoteToken.ticker} warm /></div><div><span className="eyebrow"><i /> POOL DETAIL</span><div className="pool-title-row"><h1>{pool.name}</h1>{pool.lifecycle === 'withdraw-only' && <span className="fire-badge">Legacy · withdraw only</span>}{pool.onFire && <span className="fire-badge" title={`${pool.activity24h ?? 0} settled operations in the last 24 hours`}>🔥 On fire</span>}</div><p><span className={pool.available ? 'live-dot' : 'offline-dot'} /> {pool.available ? pool.lifecycle : 'Pool unavailable'} · {pool.contractGeneration} · {pool.feeBps} bps total fee</p></div></div>
+                <button className="primary compact" onClick={() => switchToPool(pool, 'push')}>{pool.swapEnabled ? 'Trade this pool' : 'Manage withdrawal'}</button>
               </div>
 
               <div className="metric-grid">
