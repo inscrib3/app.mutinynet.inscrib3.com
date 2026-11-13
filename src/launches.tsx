@@ -51,6 +51,9 @@ interface LaunchQuoteResponse {
 interface LaunchTrade { id: string; venue: 'curve' | 'pool'; side: 'buy' | 'sell'; payAddress: string; inputAmount: string; outputAmount: string; txid: string; createdAt: number }
 interface LaunchRequest { id: string; launchId: string; venue: 'curve' | 'pool'; side: 'buy' | 'sell'; contractAddress: string; inputAmount: string; minOutput: string; fundingSats: string; fundingTxid?: string; settlementTxid?: string; status: 'pending-funding' | 'funded' | 'settling' | 'settled' | 'refunded' | 'failed'; error?: string }
 interface BootstrapResponse { launchId: string; contractAddress: string; fundingSats: string; fundingTxid?: string; settlementTxid?: string; status: 'awaiting-funding' | 'funded' | 'opening' | 'opened' | 'refunded' | 'failed'; error?: string }
+type LaunchPriceTimeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '24h' | '7d' | '30d'
+interface LaunchPricePoint { txid: string; venue: 'curve' | 'pool'; btcReserve: string; pricingBtcReserve: string; tokenReserve: string; recordedAt: number }
+interface LaunchPriceHistory { launchId: string; timeframe: LaunchPriceTimeframe; priceUnit: 'raw-reserves'; points: LaunchPricePoint[] }
 type FundContract = (address: string, side: 'buy' | 'sell' | 'bootstrap', input: bigint, sats: bigint, tokenAssetId?: string, controlAssetId?: string) => Promise<string>
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -72,6 +75,87 @@ function LaunchMark({ launch }: { launch: Pick<Launch, 'ticker' | 'iconUrl'> }) 
 
 function PhasePill({ phase }: { phase: LaunchPhase }) {
   return <span className={`launch-phase ${phase}`}>{phase === 'curve' ? 'Bonding curve' : phase === 'pool' ? 'Graduated' : phase}</span>
+}
+
+const LAUNCH_PRICE_TIMEFRAMES: LaunchPriceTimeframe[] = ['1m', '5m', '15m', '1h', '4h', '24h', '7d', '30d']
+
+function launchPrice(point: LaunchPricePoint, decimals: number): number {
+  return (Number(point.pricingBtcReserve) / Number(point.tokenReserve)) * 10 ** decimals / 100_000_000
+}
+
+function chartPrice(value: number): string {
+  if (!Number.isFinite(value)) return '—'
+  if (value === 0) return '0'
+  if (Math.abs(value) < 0.00000001) return value.toExponential(6)
+  return value.toLocaleString(undefined, { maximumSignificantDigits: 10 })
+}
+
+function chartTime(timestamp: number, timeframe: LaunchPriceTimeframe): string {
+  const date = new Date(timestamp)
+  if (timeframe === '1m' || timeframe === '5m') return date.toLocaleTimeString([], { minute: '2-digit', second: '2-digit' })
+  if (timeframe === '7d' || timeframe === '30d') return date.toLocaleDateString([], { month: 'short', day: 'numeric' })
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function LaunchPriceChart({ launch }: { launch: Launch }) {
+  const [timeframe, setTimeframe] = useState<LaunchPriceTimeframe>('4h')
+  const [points, setPoints] = useState<LaunchPricePoint[]>([])
+  const [chartError, setChartError] = useState('')
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
+
+  useEffect(() => {
+    const controller = new AbortController()
+    const load = () => request<LaunchPriceHistory>(`/v1/launches/${encodeURIComponent(launch.id)}/prices?timeframe=${timeframe}`, { signal: controller.signal })
+      .then((history) => { setPoints(Array.isArray(history.points) ? history.points : []); setChartError('') })
+      .catch((cause: unknown) => { if ((cause as Error).name !== 'AbortError') setChartError(cause instanceof Error ? cause.message : String(cause)) })
+    void load()
+    const refresh = window.setInterval(() => void load(), 15_000)
+    return () => { controller.abort(); window.clearInterval(refresh) }
+  }, [launch.id, timeframe])
+
+  const series = points.map((point) => ({ ...point, price: launchPrice(point, launch.decimals) })).filter((point) => Number.isFinite(point.price))
+  const prices = series.map((point) => point.price); const latest = prices.at(-1); const first = prices[0]
+  const change = first && latest !== undefined ? ((latest - first) / first) * 100 : 0
+  const min = prices.length ? Math.min(...prices) : 0; const max = prices.length ? Math.max(...prices) : 0
+  const spread = max - min || Math.max(Math.abs(max) * 0.02, 1e-12)
+  const firstTime = series[0]?.recordedAt ?? 0; const lastTime = series.at(-1)?.recordedAt ?? firstTime
+  const coordinates = series.map((point) => ({
+    x: firstTime === lastTime ? 300 : 18 + ((point.recordedAt - firstTime) / (lastTime - firstTime)) * 564,
+    y: 162 - ((point.price - (min - spread * 0.08)) / (spread * 1.16)) * 144,
+  }))
+  const line = coordinates.map(({ x, y }) => `${x.toFixed(2)},${y.toFixed(2)}`).join(' ')
+  const lastCoordinate = coordinates.at(-1); const hoveredCoordinate = hoveredIndex === null ? undefined : coordinates[hoveredIndex]
+  const hoveredPoint = hoveredIndex === null ? undefined : series[hoveredIndex]
+  const graduationIndex = series.findIndex((point, index) => point.venue === 'pool' && series.slice(0, index).some((earlier) => earlier.venue === 'curve'))
+  const graduationCoordinate = graduationIndex >= 0 ? coordinates[graduationIndex] : undefined
+  const emptyMessage = launch.phase === 'preparing' ? 'The price chart appears after the first settled trade.' : 'No price updates in this timeframe. Try a longer range.'
+
+  return <section className="price-chart launch-price-chart">
+    <div className="price-chart-head"><div><span>CONTINUOUS PRICE · CURVE → PERMANENT POOL</span><div><h3>BTC per {launch.ticker}</h3>{latest !== undefined && <b>{chartPrice(latest)}</b>}<em className={change >= 0 ? 'positive' : 'negative'}>{change >= 0 ? '+' : ''}{change.toFixed(2)}%</em></div></div>
+      <div className="price-timeframes">{LAUNCH_PRICE_TIMEFRAMES.map((value) => <button key={value} className={timeframe === value ? 'active' : ''} onClick={() => setTimeframe(value)}>{value.toUpperCase()}</button>)}</div></div>
+    <div className="price-chart-canvas" onPointerMove={(event) => {
+      if (!coordinates.length) return
+      const bounds = event.currentTarget.getBoundingClientRect(); const contentWidth = Math.max(bounds.width - 28, 1)
+      const x = Math.min(600, Math.max(0, ((event.clientX - bounds.left - 14) / contentWidth) * 600)); let nearest = 0
+      for (let index = 1; index < coordinates.length; index += 1) if (Math.abs(coordinates[index]!.x - x) < Math.abs(coordinates[nearest]!.x - x)) nearest = index
+      setHoveredIndex(nearest)
+    }} onPointerLeave={() => setHoveredIndex(null)}>
+      {prices.length ? <svg viewBox="0 0 600 180" role="img" aria-label={`${launch.ticker} launch price chart`} preserveAspectRatio="none">
+        <defs><linearGradient id={`launch-price-fill-${launch.id}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#34d399" stopOpacity=".24" /><stop offset="1" stopColor="#34d399" stopOpacity="0" /></linearGradient></defs>
+        {[36, 72, 108, 144].map((y) => <line key={y} x1="0" x2="600" y1={y} y2={y} className="chart-grid" />)}
+        {prices.length > 1 && <polygon points={`18,180 ${line} 582,180`} fill={`url(#launch-price-fill-${launch.id})`} />}<polyline points={line} className="chart-line" />
+      </svg> : <div className="chart-empty">{chartError || emptyMessage}</div>}
+      {prices.length > 0 && <div className="chart-overlay" aria-hidden="true">
+        {graduationCoordinate && <><span className="launch-graduation-line" style={{ left: `${graduationCoordinate.x / 6}%` }} /><span className="launch-graduation-label" style={{ left: `${graduationCoordinate.x / 6}%` }}>GRADUATED</span></>}
+        {lastCoordinate && <span className="chart-marker chart-last" style={{ left: `${lastCoordinate.x / 6}%`, top: `${lastCoordinate.y / 1.8}%` }} />}
+        {hoveredCoordinate && hoveredPoint && <><span className="chart-hover-guide" style={{ left: `${hoveredCoordinate.x / 6}%` }} /><span className="chart-marker chart-hover-marker" style={{ left: `${hoveredCoordinate.x / 6}%`, top: `${hoveredCoordinate.y / 1.8}%` }} />
+          <div className="chart-tooltip" style={{ left: `${hoveredCoordinate.x / 6}%`, top: `${hoveredCoordinate.y / 1.8}%`, transform: hoveredCoordinate.x > 450 ? 'translate(calc(-100% - 12px), calc(-100% - 10px))' : 'translate(12px, calc(-100% - 10px))' }}>
+            <span>{hoveredPoint.venue === 'curve' ? 'Bonding curve' : 'Permanent pool'}</span><b>{chartPrice(hoveredPoint.price)} BTC</b><small>{new Date(hoveredPoint.recordedAt).toLocaleString()}</small><small>{btc(hoveredPoint.btcReserve)} · {compact(hoveredPoint.tokenReserve)} {launch.ticker}</small>
+          </div></>}
+      </div>}
+    </div>
+    <div className="price-chart-foot"><span>{series[0] ? chartTime(series[0].recordedAt, timeframe) : '—'}</span><span>Virtual BTC prices the curve; real BTC prices the pool · {launch.decimals} token decimals</span><span>{series.at(-1) ? chartTime(series.at(-1)!.recordedAt, timeframe) : '—'}</span></div>
+  </section>
 }
 
 export function LaunchesPage({ onOpen, onCreate }: { onOpen: (id: string) => void; onCreate: () => void }) {
@@ -160,6 +244,7 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, co
   return <section className="view-page launch-detail-page">
     <div className="launch-detail-hero"><button className="back-link" onClick={onBack}>← All launches</button><div className="launch-detail-title"><LaunchMark launch={launch} /><div><span className="eyebrow"><i /> {launch.protocolGeneration ?? 'CURVE-V1'}</span><h1>{launch.name}</h1><p>${launch.ticker} · created by <code>{short(launch.creatorAddress, 8)}</code></p></div></div><PhasePill phase={launch.phase} /></div>
     <div className="metric-grid"><div><span>Graduation</span><b>{(launch.progressBps / 100).toFixed(2)}%</b><small>{btc(launch.realBtcReserve)} of {btc(launch.economics.graduationThreshold)}</small></div><div><span>Available on curve</span><b>{compact(launch.sellableTokens)}</b><small>${launch.ticker} raw units</small></div><div><span>Volume</span><b>{btc(launch.volumeBtc)}</b><small>{launch.tradeCount.toLocaleString()} trades</small></div><div><span>Total fee</span><b>{((launch.economics.creatorFeeBps + launch.economics.protocolFeeBps) / 100).toFixed(2)}%</b><small>{launch.economics.creatorFeeBps / 100}% creator · {launch.economics.protocolFeeBps / 100}% protocol</small></div></div>
+    <LaunchPriceChart launch={launch} />
     <div className="launch-detail-grid"><article className="token-detail-card"><div className="token-detail-head"><LaunchMark launch={launch} /><div><h2>Launch terms</h2><span>Immutable economics snapshot</span></div></div><dl><div><dt>Total supply</dt><dd>{compact(launch.economics.supply)}</dd></div><div><dt>Reserved for pool</dt><dd>{compact(launch.economics.reservedTokens)}</dd></div><div><dt>Virtual BTC</dt><dd>{btc(launch.economics.virtualBtc)}</dd></div><div><dt>Asset ID</dt><dd><code>{launch.assetId ? short(launch.assetId, 10) : 'Preparing'}</code></dd></div><div><dt>Protocol</dt><dd><code>{launch.protocolGeneration}</code></dd></div></dl></article>
       <article className="launch-trade-card"><span className="panel-label">{curveOpen ? 'CURVE QUOTE' : launch.phase === 'pool' ? 'POOL QUOTE' : 'LAUNCH STATUS'}</span><h2>{curveOpen ? `Preview ${launch.ticker}` : launch.phase === 'pool' ? 'Graduated pool preview' : 'Trading is not open'}</h2><p>Exact integer quote from the indexed reserves. A funding contract is created only after wallet review.</p>{(curveOpen || launch.phase === 'pool') && <><div className="launch-side-tabs"><button className={side === 'buy' ? 'active' : ''} onClick={() => { setSide('buy'); setQuote(null) }}>Buy</button><button className={side === 'sell' ? 'active' : ''} onClick={() => { setSide('sell'); setQuote(null) }}>Sell</button></div><label className="launch-quote-input"><span>{side === 'buy' ? 'Satoshis in' : `${launch.ticker} raw units in`}</span><input value={amount} onChange={(event) => { setAmount(event.target.value); setQuote(null) }} inputMode="numeric" placeholder="0" /></label><button className="secondary full" onClick={() => void previewQuote()} disabled={quoteBusy || tradeBusy}>{quoteBusy ? 'Calculating…' : 'Preview quote'}</button>{quote && <div className="launch-quote-result"><div><span>Output</span><b>{compact(quote.quote.outputAmount)} {side === 'buy' ? launch.ticker : 'sats'}</b></div><div><span>Total fees</span><b>{compact(BigInt(quote.quote.creatorFee) + BigInt(quote.quote.protocolFee))} sats</b></div>{BigInt(quote.quote.refundAmount) > 0n && <div><span>Final-fill refund</span><b>{compact(quote.quote.refundAmount)} sats</b></div>}{quote.quote.graduates && <strong>This buy reaches graduation.</strong>}</div>}</>}{tradingEnabled ? <button className="primary" onClick={() => void trade()} disabled={tradeBusy || !quote || Boolean(tradeRequest && !['settled', 'refunded', 'failed'].includes(tradeRequest.status))}>{tradeBusy ? 'Waiting for wallet…' : !walletAddress ? 'Connect wallet' : 'Review & fund trade'}</button> : <button className="primary launch-disabled" disabled>Wallet trading disabled until funded validation</button>}{tradeRequest && <div className="launch-request-status"><b>{tradeRequest.status.replace('-', ' ')}</b><span>{tradeRequest.settlementTxid ? short(tradeRequest.settlementTxid, 8) : tradeRequest.fundingTxid ? short(tradeRequest.fundingTxid, 8) : 'Waiting for wallet funding'}</span>{tradeRequest.status === 'funded' && <button className="secondary full" onClick={() => void refundTrade()} disabled={tradeBusy}>Refund funding</button>}</div>}<small>Never fund an address shown outside a wallet transaction preview.</small></article></div>
     {error && <div className="notice error"><b>Quote unavailable</b><span>{error}</span></div>}<div className="notice asset-risk"><b>Experimental launch</b><span>Names and tickers are not unique. Verify the asset ID, fee policy, holder concentration and wallet transaction before signing.</span></div>
