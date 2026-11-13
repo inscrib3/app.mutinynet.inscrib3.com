@@ -122,8 +122,10 @@ interface LiquidityRequest extends Omit<SwapRequest, 'fundingSats'> {
   lpAmount: string
 }
 type ActivityEvent = (SwapRequest & { activityType: 'swap' }) | (LiquidityRequest & { activityType: 'deposit' | 'withdraw' })
-interface PointsSummary { identityKey: string; total: string; poolPoints: string; swapPoints: string; referralPoints: string; referralCode: string; referredUsers: number; rank?: number; participants: number; portableToMainnet: true }
-interface LeaderboardEntry { rank: number; identityKey: string; address: string; total: string; poolPoints: string; swapPoints: string }
+interface LaunchActivityRequest { id: string; launchId: string; venue: 'curve' | 'pool'; side: 'buy' | 'sell'; inputAmount: string; rewardPoints: string; fundingTxid?: string; settlementTxid?: string; status: 'pending-funding' | 'funded' | 'settling' | 'settled' | 'refunded' | 'failed'; createdAt: number; activityType: 'launch-trade' }
+type WalletActivityEvent = ActivityEvent | LaunchActivityRequest
+interface PointsSummary { identityKey: string; total: string; poolPoints: string; swapPoints: string; launchPoints: string; launchTradePoints: string; referralPoints: string; referralCode: string; referredUsers: number; rank?: number; participants: number; portableToMainnet: true }
+interface LeaderboardEntry { rank: number; identityKey: string; address: string; total: string; poolPoints: string; swapPoints: string; launchPoints: string; launchTradePoints: string }
 
 interface IssueAssetResult { arkTxId: string; assetId: string }
 interface IssueAssetInput {
@@ -515,7 +517,7 @@ function App() {
   const [request, setRequest] = useState<SwapRequest | null>(null)
   const [liquidityAmount, setLiquidityAmount] = useState('')
   const [liquidityRequest, setLiquidityRequest] = useState<LiquidityRequest | null>(null)
-  const [activity, setActivity] = useState<ActivityEvent[]>([])
+  const [activity, setActivity] = useState<WalletActivityEvent[]>([])
   const [activityCursor, setActivityCursor] = useState<string | undefined>()
   const [createMode, setCreateMode] = useState<'asset' | 'pool'>(initialRoute.page === 'create' && initialParams.get('mode') === 'pool' ? 'pool' : 'asset')
   const [assetForm, setAssetForm] = useState(EMPTY_ASSET_FORM)
@@ -816,7 +818,7 @@ function App() {
 
   const refreshWalletActivity = useCallback(async () => {
     if (!address) return
-    const result = await api<CursorPage<ActivityEvent>>(`/v1/activity?payAddress=${encodeURIComponent(address)}&limit=25`)
+    const result = await api<CursorPage<WalletActivityEvent>>(`/v1/activity?payAddress=${encodeURIComponent(address)}&limit=25`)
     setActivity(result.items); setActivityCursor(result.nextCursor)
   }, [address, setActivity, setActivityCursor])
 
@@ -835,7 +837,7 @@ function App() {
       ? address ? `/v1/activity?payAddress=${encodeURIComponent(address)}&limit=25&cursor=${encodeURIComponent(activityCursor)}` : undefined
       : poolId ? `/v1/pools/${encodeURIComponent(poolId)}/activity?limit=25&cursor=${encodeURIComponent(activityCursor)}` : undefined
     if (!path) return
-    const result = await api<CursorPage<ActivityEvent>>(path)
+    const result = await api<CursorPage<WalletActivityEvent>>(path)
     setActivity((current) => [...current, ...result.items]); setActivityCursor(result.nextCursor)
   }
 
@@ -1441,10 +1443,10 @@ function App() {
         </section>
         </> : page === 'launches' ? <LaunchesPage onOpen={(id) => navigate('launch', id)} onCreate={() => navigate('launch-create')} />
         : page === 'launch' ? <LaunchDetailPage id={launchId} onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
-          walletAddress={address} connectWallet={() => void requireWallet()} fundContract={fundLaunchContract} />
+          walletAddress={address} connectWallet={() => void requireWallet()} fundContract={fundLaunchContract} referralCode={referralCode} />
         : page === 'launch-create' ? <CreateLaunchPage onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
           walletAddress={address} connectWallet={() => void requireWallet()} issueAsset={issueLaunchAsset} fundContract={fundLaunchContract}
-          onOpened={(id) => navigate('launch', id)} />
+          onOpened={(id) => navigate('launch', id)} referralCode={referralCode} />
         : page === 'pools' ? <section className="view-page">
           <div className="view-heading"><div><span className="eyebrow"><i /> LIVE LIQUIDITY</span><h1>Pools</h1><p>Current covenant reserves and AMM identifiers.</p></div><button className="secondary" onClick={() => runWithToast(refreshPools)}>Refresh</button></div>
           <div className="pool-search-row">
@@ -1502,7 +1504,7 @@ function App() {
               <div className="activity-section-heading"><div><span className="eyebrow"><i /> LIVE FEED</span><h2>Pool activity</h2><p>Swap, liquidity additions and removals for this pool.</p></div><button className="secondary" onClick={() => runWithToast(refreshPoolActivity)}>Refresh</button></div>
               <div className="activity-panel">
                 <div className="activity-head"><span>Type</span><span>Amount</span><span>Status</span><span>Transaction</span></div>
-                {activity.length === 0 ? <div className="empty-state">No activity for this pool yet.</div> : activity.map((item) => {
+                {activity.length === 0 ? <div className="empty-state">No activity for this pool yet.</div> : (activity as ActivityEvent[]).map((item) => {
                   const isSwap = item.activityType === 'swap'
                   const sold = isSwap && item.sellAssetId ? tokenDetails(item.sellAssetId) : undefined
                   const amountText = isSwap ? `${displayAmount(item.sellAmount ?? '0', sold?.decimals ?? 0)} ${sold?.ticker ?? 'ASSET'}` : item.activityType === 'deposit' ? `${displayAmount(item.baseAmount, base.decimals)} ${base.ticker} + ${displayAmount(item.quoteAmount, quoteToken.decimals)} ${quoteToken.ticker}` : `${displayAmount(item.lpAmount, base.decimals)} LP`
@@ -1562,17 +1564,22 @@ function App() {
           </div>}
           {error && <div className="notice error create-error"><b>Creation unavailable</b><span>{error}</span></div>}
         </section> : <section className="view-page">
-          <div className="view-heading"><div><span className="eyebrow"><i /> WALLET HISTORY</span><h1>My activity</h1><p>Your portable score, swaps, deposits, and withdrawals across the platform.</p></div>{address && <button className="secondary" onClick={() => runWithToast(() => Promise.all([refreshWalletActivity(), refreshPoints()]))}>Refresh</button>}</div>
-          {!address ? <div className="empty-state activity-connect-state"><div className="activity-connect-icon">◇</div><h2>Connect your wallet</h2><p>Connect Inscrib3 Wallet to view your score and activity across every pool.</p><button className="secondary" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Connect wallet'}</button></div> : <>
+          <div className="view-heading"><div><span className="eyebrow"><i /> WALLET HISTORY</span><h1>My activity</h1><p>Your portable score and wallet-signed pool and launch activity.</p></div>{address && <button className="secondary" onClick={() => runWithToast(() => Promise.all([refreshWalletActivity(), refreshPoints()]))}>Refresh</button>}</div>
+          {!address ? <div className="empty-state activity-connect-state"><div className="activity-connect-icon">◇</div><h2>Connect your wallet</h2><p>Connect Inscrib3 Wallet to view your score and activity across pools and launches.</p><button className="secondary" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Connect wallet'}</button></div> : <>
           <div className="points-dashboard">
             <section className="points-score-card"><span>YOUR SCORE</span><div><b>{points ? comma(points.total) : '—'}</b><em>PTS</em></div><p>{points?.rank ? `Rank #${points.rank} of ${points.participants}` : 'Complete an eligible action to enter the ranking'}</p><small>Mutinynet points will migrate to Mainnet with the same wallet identity.</small><a href="https://docs.inscrib3.com/app/points" target="_blank" rel="noreferrer">Migration details ↗</a></section>
-            <section className="points-breakdown"><div><span>POOL CREATION</span><b>{points ? comma(points.poolPoints) : '—'}</b><small>10 points per opened pool</small></div><div><span>SWAPS</span><b>{points ? comma(points.swapPoints) : '—'}</b><small>At least 1 point · scales with protocol fee sats</small></div></section>
-            <section className="referral-card"><div><span>REFERRALS</span><b>{points ? comma(points.referralPoints) : '—'} PTS</b><small>{points?.referredUsers ?? 0} referred wallets · +1 per opened pool or settled swap</small></div>{points && <><code>{`${window.location.origin}/?ref=${points.referralCode}`}</code><div><button onClick={() => window.open(`https://x.com/intent/post?text=${encodeURIComponent(`Try Inscrib3 App on Mutinynet and earn portable points: ${window.location.origin}/?ref=${points.referralCode}`)}`, '_blank', 'noopener,noreferrer')}>Share on X</button><button onClick={() => { void navigator.clipboard.writeText(`${window.location.origin}/?ref=${points.referralCode}`); window.open('https://discord.com/channels/@me', '_blank', 'noopener,noreferrer') }}>Copy for Discord</button></div></>}</section>
+            <section className="points-breakdown"><div><span>POOL CREATION</span><b>{points ? comma(points.poolPoints) : '—'}</b><small>10 points per opened pool</small></div><div><span>SWAPS</span><b>{points ? comma(points.swapPoints) : '—'}</b><small>Minimum 1 · protocol fee sats</small></div><div><span>LAUNCH CREATION</span><b>{points ? comma(points.launchPoints) : '—'}</b><small>10 points per opened launch</small></div><div><span>LAUNCH TRADES</span><b>{points ? comma(points.launchTradePoints) : '—'}</b><small>Minimum 1 · protocol fee sats</small></div></section>
+            <section className="referral-card"><div><span>REFERRALS</span><b>{points ? comma(points.referralPoints) : '—'} PTS</b><small>{points?.referredUsers ?? 0} referred wallets · +1 per opened pool, launch, or settled trade</small></div>{points && <><code>{`${window.location.origin}/?ref=${points.referralCode}`}</code><div><button onClick={() => window.open(`https://x.com/intent/post?text=${encodeURIComponent(`Try Inscrib3 App on Mutinynet and earn portable points: ${window.location.origin}/?ref=${points.referralCode}`)}`, '_blank', 'noopener,noreferrer')}>Share on X</button><button onClick={() => { void navigator.clipboard.writeText(`${window.location.origin}/?ref=${points.referralCode}`); window.open('https://discord.com/channels/@me', '_blank', 'noopener,noreferrer') }}>Copy for Discord</button></div></>}</section>
             <section className="points-leaderboard"><div className="points-board-head"><span>TOP PLAYERS</span><small>LIVE</small></div>{leaderboard.length ? leaderboard.map((item) => <div className={item.identityKey === points?.identityKey ? 'current' : ''} key={item.identityKey}><i>#{item.rank}</i><code>{short(item.address, 5)}</code><b>{comma(item.total)} PTS</b></div>) : <p>No scores yet.</p>}</section>
           </div>
           <div className="activity-panel">
             <div className="activity-head"><span>Type</span><span>Amount</span><span>Status</span><span>Transaction</span></div>
             {activity.length === 0 ? <div className="empty-state">No activity for this wallet yet.</div> : activity.map((item) => {
+              if (item.activityType === 'launch-trade') return <div className="activity-row" key={`launch-trade-${item.id}`}>
+                <div><span className="activity-icon launch-trade">↗</span><div><b>{item.side === 'buy' ? 'Launch buy' : 'Launch sell'}</b><small>{item.launchId} · {item.venue} · {new Date(item.createdAt).toLocaleString()} · +{comma(item.rewardPoints)} PTS</small></div></div>
+                <code>{comma(item.inputAmount)} {item.side === 'buy' ? 'sats' : 'raw units'}</code><span className={`status-pill ${item.status}`}>{item.status.replace('-', ' ')}</span>
+                <code title={item.settlementTxid ?? item.fundingTxid ?? ''}>{item.settlementTxid || item.fundingTxid ? short(item.settlementTxid ?? item.fundingTxid!, 7) : '—'}</code>
+              </div>
               const isSwap = item.activityType === 'swap'
               const sold = item.activityType === 'swap' && item.sellAssetId ? tokenDetails(item.sellAssetId) : undefined
               const activityPool = pools.find((candidate) => candidate.id === item.poolId)
