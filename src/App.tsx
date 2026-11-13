@@ -3,6 +3,7 @@ import './App.css'
 import { firstFormError, MAX_WALLET_AMOUNT, MIN_PROTOCOL_FEE_BPS, parseDisplayAmount, rawAmount, validateAssetForm, validatePoolForm, type AssetFormInput, type PoolFormInput } from './form-validation'
 import { loadSavedPayments, savePayment, type PaymentKind, type SavedPayment } from './open-payments'
 import { describeWalletError, errorMessage, MISSING_WALLET, WALLET_INSTALL_URL, type WalletIssue } from './wallet-issues'
+import { CreateLaunchPage, LaunchDetailPage, LaunchesPage } from './launches'
 
 const API = import.meta.env.VITE_API_URL ?? '/api'
 const NETWORK = import.meta.env.VITE_NETWORK ?? 'mutinynet'
@@ -29,6 +30,7 @@ interface DeploymentInfo {
   ammContractGeneration: 'amm-v2'
   maxSwapBatch: number
   maxLiquidityBatch: number
+  launches?: { catalog: boolean; protocol: 'curve-v1'; tradingEnabled: boolean; reason: string }
 }
 
 interface NetworkInfo {
@@ -147,10 +149,13 @@ interface PoolCreation {
   openingTxid?: string
 }
 
-type Page = 'swap' | 'pools' | 'pool' | 'create' | 'activity'
+type Page = 'swap' | 'launches' | 'launch' | 'launch-create' | 'pools' | 'pool' | 'create' | 'activity'
 
-function routeFromLocation(): { page: Page; poolId?: string } {
+function routeFromLocation(): { page: Page; poolId?: string; launchId?: string } {
   const parts = window.location.pathname.split('/').filter(Boolean)
+  if (parts[0] === 'launches' && parts[1] === 'create') return { page: 'launch-create' }
+  if (parts[0] === 'launches' && parts[1]) return { page: 'launch', launchId: decodeURIComponent(parts[1]) }
+  if (parts[0] === 'launches') return { page: 'launches' }
   if (parts[0] === 'pools' && parts[1]) return { page: 'pool', poolId: decodeURIComponent(parts[1]) }
   if (parts[0] === 'pools') return { page: 'pools' }
   if (parts[0] === 'create') return { page: 'create' }
@@ -158,9 +163,12 @@ function routeFromLocation(): { page: Page; poolId?: string } {
   return { page: 'swap' }
 }
 
-function pathForPage(page: Page, poolId?: string): string {
+function pathForPage(page: Page, entityId?: string): string {
+  if (page === 'launches') return '/launches'
+  if (page === 'launch' && entityId) return `/launches/${encodeURIComponent(entityId)}`
+  if (page === 'launch-create') return '/launches/create'
   if (page === 'pools') return '/pools'
-  if (page === 'pool' && poolId) return `/pools/${encodeURIComponent(poolId)}`
+  if (page === 'pool' && entityId) return `/pools/${encodeURIComponent(entityId)}`
   if (page === 'create') return '/create'
   if (page === 'activity') return '/activity'
   return '/'
@@ -463,6 +471,7 @@ function App() {
   const [poolResultTotal, setPoolResultTotal] = useState(0)
   const [poolCursor, setPoolCursor] = useState<string | undefined>()
   const [poolId, setPoolId] = useState(initialRoute.poolId ?? '')
+  const [launchId, setLaunchId] = useState(initialRoute.launchId ?? '')
   const [address, setAddress] = useState('')
   const [assets, setAssets] = useState<AssetInfo[]>([])
   const [btcBalance, setBtcBalance] = useState(0)
@@ -645,14 +654,15 @@ function App() {
     setLinkCopied(false)
   }
 
-  function navigate(nextPage: Page, nextPoolId?: string) {
-    const url = new URL(pathForPage(nextPage, nextPoolId), window.location.origin)
+  function navigate(nextPage: Page, entityId?: string) {
+    const url = new URL(pathForPage(nextPage, entityId), window.location.origin)
     if (nextPage === 'pools' && poolSearch.trim()) url.searchParams.set('q', poolSearch.trim())
     if (nextPage === 'create' && createMode === 'pool') url.searchParams.set('mode', 'pool')
     window.history.pushState(null, '', `${url.pathname}${url.search}`)
     setPage(nextPage)
     if (nextPage === 'activity') { setActivity([]); setActivityCursor(undefined) }
-    if (nextPoolId) setPoolId(nextPoolId)
+    if (nextPage === 'pool' && entityId) setPoolId(entityId)
+    if (nextPage === 'launch' && entityId) setLaunchId(entityId)
     setError('')
   }
 
@@ -812,6 +822,7 @@ function App() {
       setPage(route.page)
       const nextPoolId = route.poolId ?? ''
       if (nextPoolId) setPoolId(nextPoolId)
+      if (route.launchId) setLaunchId(route.launchId)
       if (route.page === 'pools') setPoolSearch(params.get('q') ?? '')
       if (route.page === 'create') setCreateMode(params.get('mode') === 'pool' ? 'pool' : 'asset')
       if (route.page === 'swap') setMode(['deposit', 'withdraw'].includes(params.get('mode') ?? '') ? params.get('mode') as 'deposit' | 'withdraw' : 'swap')
@@ -1019,6 +1030,23 @@ function App() {
 
   function requireWallet() {
     return address ? switchWalletNetwork() : connect()
+  }
+
+  async function issueLaunchAsset(input: { amount: bigint; metadata: { name?: string; ticker: string; decimals: number } }): Promise<IssueAssetResult> {
+    if (!window.arkade || !walletReady) throw new Error('Connect Inscrib3 Wallet on the correct network first.')
+    await assertWalletNetwork(window.arkade)
+    return issueAssetWithRetry(window.arkade, { amount: walletNumber(input.amount, 'launch asset supply'), metadata: input.metadata }, () => undefined)
+  }
+
+  async function fundLaunchContract(contractAddress: string, side: 'buy' | 'sell' | 'bootstrap', input: bigint,
+    fundingSats: bigint, tokenAssetId?: string, controlAssetId?: string): Promise<string> {
+    if (!window.arkade || !walletReady) throw new Error('Connect Inscrib3 Wallet on the correct network first.')
+    await assertWalletNetwork(window.arkade)
+    if (side === 'buy') return window.arkade.sendToAddress(contractAddress, walletNumber(fundingSats, 'launch buy funding'))
+    const assets = side === 'sell'
+      ? [{ assetId: tokenAssetId!, amount: walletNumber(input, 'launch token funding') }]
+      : [{ assetId: tokenAssetId!, amount: walletNumber(input, 'launch token supply') }, { assetId: controlAssetId!, amount: 1 }]
+    return window.arkade.sendAsset(contractAddress, assets, walletNumber(fundingSats, 'launch contract satoshis'))
   }
 
   async function createAsset() {
@@ -1261,7 +1289,7 @@ function App() {
     <div className="app-shell">
       <header>
         <button className="brand" onClick={() => navigate('swap')} aria-label="Inscrib3 app home"><img src="/logo.svg" alt="" /><span>INSCRIB3</span><small>APP</small></button>
-        <nav>{(['swap', 'pools', 'create', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') runWithToast(refreshPools) }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}<a className="nav-docs" href={DOCS_URL} target="_blank" rel="noreferrer">Docs ↗</a></nav>
+        <nav>{(['swap', 'launches', 'pools', 'create', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') || (item === 'launches' && (page === 'launch' || page === 'launch-create')) ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') runWithToast(refreshPools) }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}<a className="nav-docs" href={DOCS_URL} target="_blank" rel="noreferrer">Docs ↗</a></nav>
         <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span>{address && <button className="points-chip" onClick={() => navigate('activity')} title="Your portable points"><span>◆</span>{points ? comma(points.total) : '—'} PTS</button>}{address ? <span className={`wallet-address${walletOnWrongNetwork ? ' wrong-network' : ''}`} title={address}>{short(address, 4)}</span> : <button className="wallet-small" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Connect wallet'}</button>}</div>
       </header>
 
@@ -1369,7 +1397,13 @@ function App() {
             </div>
           </aside>
         </section>
-        </> : page === 'pools' ? <section className="view-page">
+        </> : page === 'launches' ? <LaunchesPage onOpen={(id) => navigate('launch', id)} onCreate={() => navigate('launch-create')} />
+        : page === 'launch' ? <LaunchDetailPage id={launchId} onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
+          walletAddress={address} connectWallet={() => void requireWallet()} fundContract={fundLaunchContract} />
+        : page === 'launch-create' ? <CreateLaunchPage onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
+          walletAddress={address} connectWallet={() => void requireWallet()} issueAsset={issueLaunchAsset} fundContract={fundLaunchContract}
+          onOpened={(id) => navigate('launch', id)} />
+        : page === 'pools' ? <section className="view-page">
           <div className="view-heading"><div><span className="eyebrow"><i /> LIVE LIQUIDITY</span><h1>Pools</h1><p>Current covenant reserves and AMM identifiers.</p></div><button className="secondary" onClick={() => runWithToast(refreshPools)}>Refresh</button></div>
           <div className="pool-search-row">
             <label className="search-field"><span aria-hidden="true">⌕</span><input type="search" value={poolSearch} onChange={(event) => updatePoolSearch(event.target.value)} placeholder="Search by pool, ticker or asset ID" aria-label="Search pools" />{poolSearch && <button type="button" onClick={() => updatePoolSearch('')} aria-label="Clear pool search">×</button>}</label>
