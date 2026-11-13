@@ -279,6 +279,7 @@ aside { display: flex; flex-direction: column; gap: 16px; }
 .launch-card { min-width: 0; padding: 21px; display: flex; flex-direction: column; gap: 17px; border: 1px solid var(--line); border-radius: 18px; color: var(--text); background: linear-gradient(145deg,rgba(255,255,255,.035),rgba(255,255,255,.008)); cursor: pointer; text-align: left; box-shadow: 0 24px 65px rgba(0,0,0,.28); }
 .launch-card:hover { border-color: rgba(52,211,153,.38); transform: translateY(-2px); }
 .launch-card-head { display: grid; grid-template-columns: auto minmax(0,1fr) auto; align-items: center; gap: 12px; }
+.launch-card-badges { display: flex; align-items: center; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
 .launch-card-head h2 { margin: 0 0 4px; overflow: hidden; font-size: 16px; font-weight: 500; text-overflow: ellipsis; white-space: nowrap; }.launch-card-head > div > span { color: var(--green); font: 10px var(--mono); }
 .launch-icon { width: 42px; height: 42px; flex: 0 0 42px; object-fit: cover; border: 1px solid rgba(52,211,153,.35); border-radius: 12px; background: var(--green-soft); }
 .launch-icon-fallback { display: grid; place-items: center; color: var(--green-light); font: 600 11px var(--mono); }
