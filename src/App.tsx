@@ -382,13 +382,16 @@ function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals
   const lastCoordinate = coordinates.at(-1)
   const hoveredCoordinate = hoveredIndex === null ? undefined : coordinates[hoveredIndex]
   const hoveredPoint = hoveredIndex === null ? undefined : series[hoveredIndex]
+  const displayInSats = baseTicker === 'BTC' && latest !== undefined && latest > 0 && latest < 0.00000001
+  const displayUnit = displayInSats ? 'sats' : baseTicker
+  const displayPrice = (value: number) => formatPrice(value * (displayInSats ? 100_000_000 : 1))
   const emptyMessage = timeframe === '30d'
     ? 'No recorded price history for this pool yet.'
     : 'No price updates in this timeframe. Try a longer range.'
 
   return <section className="price-chart">
     <div className="price-chart-head">
-      <div><span>DISPLAY PRICE · DECIMALS APPLIED</span><div><h3>{baseTicker} per {quoteTicker}</h3>{latest !== undefined && <b>{formatPrice(latest)}</b>}<em className={change >= 0 ? 'positive' : 'negative'}>{change >= 0 ? '+' : ''}{change.toFixed(2)}%</em></div></div>
+      <div><span>DISPLAY PRICE · DECIMALS APPLIED</span><div><h3>{displayUnit} per {quoteTicker}</h3>{latest !== undefined && <b>{displayPrice(latest)}</b>}<em className={change >= 0 ? 'positive' : 'negative'}>{change >= 0 ? '+' : ''}{change.toFixed(2)}%</em></div></div>
       <div className="price-timeframes">{PRICE_TIMEFRAMES.map((value) => <button key={value} className={timeframe === value ? 'active' : ''} onClick={() => setTimeframe(value)}>{value.toUpperCase()}</button>)}</div>
     </div>
     <div className="price-chart-canvas" onPointerMove={(event) => {
@@ -402,7 +405,7 @@ function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals
       }
       setHoveredIndex(nearest)
     }} onPointerLeave={() => setHoveredIndex(null)}>
-      {prices.length ? <svg viewBox="0 0 600 180" role="img" aria-label={`${baseTicker} per ${quoteTicker} price chart`} preserveAspectRatio="none">
+      {prices.length ? <svg viewBox="0 0 600 180" role="img" aria-label={`${displayUnit} per ${quoteTicker} price chart`} preserveAspectRatio="none">
         <defs><linearGradient id={`price-fill-${pool.id}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#34d399" stopOpacity=".24" /><stop offset="1" stopColor="#34d399" stopOpacity="0" /></linearGradient></defs>
         {[36, 72, 108, 144].map((y) => <line key={y} x1="0" x2="600" y1={y} y2={y} className="chart-grid" />)}
         {prices.length > 1 && <polygon points={`18,180 ${chartPoints} 582,180`} fill={`url(#price-fill-${pool.id})`} />}
@@ -418,11 +421,11 @@ function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals
             transform: hoveredCoordinate.x > 450
               ? hoveredCoordinate.y < 60 ? 'translate(calc(-100% - 12px), 12px)' : 'translate(calc(-100% - 12px), calc(-100% - 10px))'
               : hoveredCoordinate.y < 60 ? 'translate(12px, 12px)' : 'translate(12px, calc(-100% - 10px))',
-          }}><span>{baseTicker} per {quoteTicker}</span><b>{formatPrice(hoveredPoint.price)}</b><small>{formatChartTooltipTime(hoveredPoint.recordedAt)}</small></div>
+          }}><span>{displayUnit} per {quoteTicker}</span><b>{displayPrice(hoveredPoint.price)}</b><small>{formatChartTooltipTime(hoveredPoint.recordedAt)}</small></div>
         </>}
       </div>}
     </div>
-    <div className="price-chart-foot"><span>{series[0] ? formatChartTime(series[0].recordedAt, timeframe) : '—'}</span><span>Normalized using {baseTicker} ({baseDecimals}) and {quoteTicker} ({quoteDecimals}) decimals</span><span>{series.at(-1) ? formatChartTime(series.at(-1)!.recordedAt, timeframe) : '—'}</span></div>
+    <div className="price-chart-foot"><span>{series[0] ? formatChartTime(series[0].recordedAt, timeframe) : '—'}</span><span>{displayInSats ? 'Marginal spot shown in sats · settlement uses whole sats' : `Normalized using ${baseTicker} (${baseDecimals}) and ${quoteTicker} (${quoteDecimals}) decimals`}</span><span>{series.at(-1) ? formatChartTime(series.at(-1)!.recordedAt, timeframe) : '—'}</span></div>
   </section>
 }
 
@@ -1554,7 +1557,9 @@ function App() {
             const baseReserve = BigInt(pool.baseReserve ?? '0')
             const quoteReserve = BigInt(pool.quoteReserve ?? '0')
             const quotePerBase = ratio(quoteReserve * 10n ** BigInt(base.decimals), baseReserve * 10n ** BigInt(quoteToken.decimals))
-            const basePerQuote = ratio(baseReserve * 10n ** BigInt(quoteToken.decimals), quoteReserve * 10n ** BigInt(base.decimals))
+            const inverseNumerator = baseReserve * 10n ** BigInt(quoteToken.decimals)
+            const inverseInSats = pool.baseAssetId === 'btc' && inverseNumerator < quoteReserve
+            const basePerQuote = ratio(inverseNumerator, quoteReserve * (inverseInSats ? 1n : 10n ** BigInt(base.decimals)))
             return <>
               <div className="pool-detail-hero">
                 <button className="back-link" onClick={() => navigate('pools')}>← All pools</button>
@@ -1564,7 +1569,7 @@ function App() {
 
               <div className="metric-grid">
                 <div><span>{quoteToken.ticker} per {base.ticker}</span><b>{quotePerBase}</b><small>Spot price from current reserves</small></div>
-                <div><span>{base.ticker} per {quoteToken.ticker}</span><b>{basePerQuote}</b><small>Inverse spot price</small></div>
+                <div><span>{inverseInSats ? 'sats' : base.ticker} per {quoteToken.ticker}</span><b>{basePerQuote}</b><small>{inverseInSats ? 'Marginal spot · settlement uses whole sats' : 'Inverse spot price'}</small></div>
                 <div><span>24h activity</span><b>{pool.activity24h ?? 0}</b><small>{pool.swaps24h ?? 0} swaps · {pool.liquidityEvents24h ?? 0} liquidity</small></div>
                 <div><span>LP supply</span><b>{displayAmount(pool.lpSupply ?? '0', base.decimals, 8)}</b><small>{pool.lpAssetId ? short(pool.lpAssetId, 8) : '—'}</small></div>
               </div>

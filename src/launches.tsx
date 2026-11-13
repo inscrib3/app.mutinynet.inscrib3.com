@@ -133,12 +133,15 @@ function LaunchPriceChart({ launch }: { launch: Launch }) {
   const line = coordinates.map(({ x, y }) => `${x.toFixed(2)},${y.toFixed(2)}`).join(' ')
   const lastCoordinate = coordinates.at(-1); const hoveredCoordinate = hoveredIndex === null ? undefined : coordinates[hoveredIndex]
   const hoveredPoint = hoveredIndex === null ? undefined : series[hoveredIndex]
+  const displayInSats = latest !== undefined && latest > 0 && latest < 0.00000001
+  const displayUnit = displayInSats ? 'sats' : 'BTC'
+  const displayPrice = (value: number) => chartPrice(value * (displayInSats ? 100_000_000 : 1))
   const graduationIndex = series.findIndex((point, index) => point.venue === 'pool' && series.slice(0, index).some((earlier) => earlier.venue === 'curve'))
   const graduationCoordinate = graduationIndex >= 0 ? coordinates[graduationIndex] : undefined
   const emptyMessage = launch.phase === 'preparing' ? 'The price chart appears after the first settled trade.' : 'No price updates in this timeframe. Try a longer range.'
 
   return <section className="price-chart launch-price-chart">
-    <div className="price-chart-head"><div><span>CONTINUOUS PRICE · CURVE → PERMANENT POOL</span><div><h3>BTC per {launch.ticker}</h3>{latest !== undefined && <b>{chartPrice(latest)}</b>}<em className={change >= 0 ? 'positive' : 'negative'}>{change >= 0 ? '+' : ''}{change.toFixed(2)}%</em></div></div>
+    <div className="price-chart-head"><div><span>CONTINUOUS PRICE · CURVE → PERMANENT POOL</span><div><h3>{displayUnit} per {launch.ticker}</h3>{latest !== undefined && <b>{displayPrice(latest)}</b>}<em className={change >= 0 ? 'positive' : 'negative'}>{change >= 0 ? '+' : ''}{change.toFixed(2)}%</em></div></div>
       <div className="price-timeframes">{LAUNCH_PRICE_TIMEFRAMES.map((value) => <button key={value} className={timeframe === value ? 'active' : ''} onClick={() => setTimeframe(value)}>{value.toUpperCase()}</button>)}</div></div>
     <div className="price-chart-canvas" onPointerMove={(event) => {
       if (!coordinates.length) return
@@ -157,11 +160,11 @@ function LaunchPriceChart({ launch }: { launch: Launch }) {
         {lastCoordinate && <span className="chart-marker chart-last" style={{ left: `${lastCoordinate.x / 6}%`, top: `${lastCoordinate.y / 1.8}%` }} />}
         {hoveredCoordinate && hoveredPoint && <><span className="chart-hover-guide" style={{ left: `${hoveredCoordinate.x / 6}%` }} /><span className="chart-marker chart-hover-marker" style={{ left: `${hoveredCoordinate.x / 6}%`, top: `${hoveredCoordinate.y / 1.8}%` }} />
           <div className="chart-tooltip" style={{ left: `${hoveredCoordinate.x / 6}%`, top: `${hoveredCoordinate.y / 1.8}%`, transform: hoveredCoordinate.x > 450 ? 'translate(calc(-100% - 12px), calc(-100% - 10px))' : 'translate(12px, calc(-100% - 10px))' }}>
-            <span>{hoveredPoint.venue === 'curve' ? 'Bonding curve' : 'Permanent pool'}</span><b>{chartPrice(hoveredPoint.price)} BTC</b><small>{new Date(hoveredPoint.recordedAt).toLocaleString()}</small><small>{btc(hoveredPoint.btcReserve)} · {compact(hoveredPoint.tokenReserve)} {launch.ticker}</small>
+            <span>{hoveredPoint.venue === 'curve' ? 'Bonding curve' : 'Permanent pool'}</span><b>{displayPrice(hoveredPoint.price)} {displayUnit}</b><small>{new Date(hoveredPoint.recordedAt).toLocaleString()}</small><small>{btc(hoveredPoint.btcReserve)} · {compact(hoveredPoint.tokenReserve)} {launch.ticker}</small>
           </div></>}
       </div>}
     </div>
-    <div className="price-chart-foot"><span>{series[0] ? chartTime(series[0].recordedAt, timeframe) : '—'}</span><span>Virtual BTC prices the curve; real BTC prices the pool · {launch.decimals} token decimals</span><span>{series.at(-1) ? chartTime(series.at(-1)!.recordedAt, timeframe) : '—'}</span></div>
+    <div className="price-chart-foot"><span>{series[0] ? chartTime(series[0].recordedAt, timeframe) : '—'}</span><span>{displayInSats ? `Marginal spot shown in sats · settlement uses whole sats · ${launch.decimals} token decimals` : `Virtual BTC prices the curve; real BTC prices the pool · ${launch.decimals} token decimals`}</span><span>{series.at(-1) ? chartTime(series.at(-1)!.recordedAt, timeframe) : '—'}</span></div>
   </section>
 }
 
