@@ -125,7 +125,8 @@ type ActivityEvent = (SwapRequest & { activityType: 'swap' }) | (LiquidityReques
 interface LaunchActivityRequest { id: string; launchId: string; venue: 'curve' | 'pool'; side: 'buy' | 'sell'; inputAmount: string; rewardPoints: string; fundingTxid?: string; settlementTxid?: string; status: 'pending-funding' | 'funded' | 'settling' | 'settled' | 'refunded' | 'failed'; createdAt: number; activityType: 'launch-trade' }
 type WalletActivityEvent = ActivityEvent | LaunchActivityRequest
 interface PointsSummary { identityKey: string; total: string; poolPoints: string; swapPoints: string; launchPoints: string; launchTradePoints: string; referralPoints: string; referralCode: string; referredUsers: number; rank?: number; participants: number; portableToMainnet: true }
-interface LeaderboardEntry { rank: number; identityKey: string; address: string; total: string; poolPoints: string; swapPoints: string; launchPoints: string; launchTradePoints: string }
+interface LeaderboardEntry { rank: number; identityKey: string; address: string; total: string; poolPoints: string; swapPoints: string; launchPoints: string; launchTradePoints: string; referralPoints: string }
+interface LeaderboardPage { items: LeaderboardEntry[]; total: number; nextOffset?: number }
 
 interface IssueAssetResult { arkTxId: string; assetId: string }
 interface IssueAssetInput {
@@ -152,7 +153,7 @@ interface PoolCreation {
 }
 interface PoolEligibility { eligible: boolean; assetId?: string; launchId?: string; phase?: string; reason?: string }
 
-type Page = 'swap' | 'launches' | 'launch' | 'launch-create' | 'pools' | 'pool' | 'create' | 'activity'
+type Page = 'swap' | 'launches' | 'launch' | 'launch-create' | 'pools' | 'pool' | 'create' | 'leaderboard' | 'activity'
 
 function routeFromLocation(): { page: Page; poolId?: string; launchId?: string } {
   const parts = window.location.pathname.split('/').filter(Boolean)
@@ -162,6 +163,7 @@ function routeFromLocation(): { page: Page; poolId?: string; launchId?: string }
   if (parts[0] === 'pools' && parts[1]) return { page: 'pool', poolId: decodeURIComponent(parts[1]) }
   if (parts[0] === 'pools') return { page: 'pools' }
   if (parts[0] === 'create') return { page: 'create' }
+  if (parts[0] === 'leaderboard') return { page: 'leaderboard' }
   if (parts[0] === 'activity') return { page: 'activity' }
   return { page: 'swap' }
 }
@@ -173,6 +175,7 @@ function pathForPage(page: Page, entityId?: string): string {
   if (page === 'pools') return '/pools'
   if (page === 'pool' && entityId) return `/pools/${encodeURIComponent(entityId)}`
   if (page === 'create') return '/create'
+  if (page === 'leaderboard') return '/leaderboard'
   if (page === 'activity') return '/activity'
   return '/'
 }
@@ -532,6 +535,12 @@ function App() {
   const [paymentsRestored, setPaymentsRestored] = useState(false)
   const [points, setPoints] = useState<PointsSummary | null>(null)
   const [leaderboard, setLeaderboard] = useState<LeaderboardEntry[]>([])
+  const [leaderboardQuery, setLeaderboardQuery] = useState(initialRoute.page === 'leaderboard' ? initialParams.get('q') ?? '' : '')
+  const [globalLeaderboard, setGlobalLeaderboard] = useState<LeaderboardEntry[]>([])
+  const [globalLeaderboardTotal, setGlobalLeaderboardTotal] = useState(0)
+  const [globalLeaderboardOffset, setGlobalLeaderboardOffset] = useState<number | undefined>()
+  const [globalLeaderboardLoading, setGlobalLeaderboardLoading] = useState(false)
+  const [globalLeaderboardError, setGlobalLeaderboardError] = useState('')
 
   const pool = pools.find((p) => p.id === poolId)
   const sellAsset = assets.find((a) => a.assetId === sellAssetId)
@@ -692,6 +701,7 @@ function App() {
     const url = new URL(pathForPage(nextPage, entityId), window.location.origin)
     if (nextPage === 'pools' && poolSearch.trim()) url.searchParams.set('q', poolSearch.trim())
     if (nextPage === 'create' && createMode === 'pool') url.searchParams.set('mode', 'pool')
+    if (nextPage === 'leaderboard' && leaderboardQuery.trim()) url.searchParams.set('q', leaderboardQuery.trim())
     window.history.pushState(null, '', `${url.pathname}${url.search}`)
     setPage(nextPage)
     if (nextPage === 'activity') { setActivity([]); setActivityCursor(undefined) }
@@ -703,6 +713,13 @@ function App() {
   function updatePoolSearch(value: string) {
     setPoolSearch(value)
     const url = new URL('/pools', window.location.origin)
+    if (value.trim()) url.searchParams.set('q', value.trim())
+    window.history.replaceState(null, '', `${url.pathname}${url.search}`)
+  }
+
+  function updateLeaderboardQuery(value: string) {
+    setLeaderboardQuery(value)
+    const url = new URL('/leaderboard', window.location.origin)
     if (value.trim()) url.searchParams.set('q', value.trim())
     window.history.replaceState(null, '', `${url.pathname}${url.search}`)
   }
@@ -834,6 +851,17 @@ function App() {
     setPoints(summary); setLeaderboard(leaders.items)
   }, [address])
 
+  const loadMoreLeaderboard = useCallback(async () => {
+    if (globalLeaderboardOffset === undefined || globalLeaderboardLoading) return
+    setGlobalLeaderboardLoading(true); setGlobalLeaderboardError('')
+    try {
+      const query = leaderboardQuery.trim() ? `&q=${encodeURIComponent(leaderboardQuery.trim())}` : ''
+      const result = await api<LeaderboardPage>(`/v1/points/leaderboard?limit=25&offset=${globalLeaderboardOffset}${query}`)
+      setGlobalLeaderboard((current) => [...current, ...result.items]); setGlobalLeaderboardTotal(result.total); setGlobalLeaderboardOffset(result.nextOffset)
+    } catch (cause) { setGlobalLeaderboardError(cause instanceof Error ? cause.message : 'Leaderboard unavailable') }
+    finally { setGlobalLeaderboardLoading(false) }
+  }, [globalLeaderboardLoading, globalLeaderboardOffset, leaderboardQuery])
+
   async function loadMoreActivity() {
     if (!activityCursor) return
     const path = page === 'activity'
@@ -858,6 +886,7 @@ function App() {
       if (nextPoolId) setPoolId(nextPoolId)
       if (route.launchId) setLaunchId(route.launchId)
       if (route.page === 'pools') setPoolSearch(params.get('q') ?? '')
+      if (route.page === 'leaderboard') setLeaderboardQuery(params.get('q') ?? '')
       if (route.page === 'create') setCreateMode(params.get('mode') === 'pool' ? 'pool' : 'asset')
       if (route.page === 'swap') setMode(['deposit', 'withdraw'].includes(params.get('mode') ?? '') ? params.get('mode') as 'deposit' | 'withdraw' : 'swap')
       setError('')
@@ -865,6 +894,20 @@ function App() {
     window.addEventListener('popstate', onPopState)
     return () => window.removeEventListener('popstate', onPopState)
   }, [])
+
+  useEffect(() => {
+    if (page !== 'leaderboard') return
+    const controller = new AbortController()
+    const timer = window.setTimeout(() => {
+      setGlobalLeaderboardLoading(true); setGlobalLeaderboardError('')
+      const query = leaderboardQuery.trim() ? `&q=${encodeURIComponent(leaderboardQuery.trim())}` : ''
+      void api<LeaderboardPage>(`/v1/points/leaderboard?limit=25${query}`, { signal: controller.signal })
+        .then((result) => { setGlobalLeaderboard(result.items); setGlobalLeaderboardTotal(result.total); setGlobalLeaderboardOffset(result.nextOffset) })
+        .catch((cause) => { if (!controller.signal.aborted) setGlobalLeaderboardError(cause instanceof Error ? cause.message : 'Leaderboard unavailable') })
+        .finally(() => { if (!controller.signal.aborted) setGlobalLeaderboardLoading(false) })
+    }, 250)
+    return () => { window.clearTimeout(timer); controller.abort() }
+  }, [leaderboardQuery, page])
 
   useEffect(() => {
     Promise.all([api<DeploymentInfo>('/health'), api<PageResult<Pool>>('/v1/pools?limit=100')]).then(([info, page]) => {
@@ -1345,7 +1388,7 @@ function App() {
     <div className="app-shell">
       <header>
         <button className="brand" onClick={() => navigate('swap')} aria-label="Inscrib3 app home"><img src="/logo.svg" alt="" /><span>INSCRIB3</span><small>APP</small></button>
-        <nav>{(['swap', 'launches', 'pools', 'create', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') || (item === 'launches' && (page === 'launch' || page === 'launch-create')) ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') runWithToast(refreshPools) }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}<a className="nav-docs" href={DOCS_URL} target="_blank" rel="noreferrer">Docs ↗</a></nav>
+        <nav>{(['swap', 'launches', 'pools', 'create', 'leaderboard', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') || (item === 'launches' && (page === 'launch' || page === 'launch-create')) ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') runWithToast(refreshPools) }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}<a className="nav-docs" href={DOCS_URL} target="_blank" rel="noreferrer">Docs ↗</a></nav>
         <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span>{address && <button className="points-chip" onClick={() => navigate('activity')} title="Your portable points"><span>◆</span>{points ? comma(points.total) : '—'} PTS</button>}{address ? <span className={`wallet-address${walletOnWrongNetwork ? ' wrong-network' : ''}`} title={address}>{short(address, 4)}</span> : <button className="wallet-small" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Connect wallet'}</button>}</div>
       </header>
 
@@ -1534,6 +1577,25 @@ function App() {
               {activityCursor && <button className="secondary load-more" onClick={() => runWithToast(loadMoreActivity)}>Load more activity</button>}
             </>
           })()}
+        </section> : page === 'leaderboard' ? <section className="view-page leaderboard-page">
+          <div className="view-heading"><div><span className="eyebrow"><i /> GLOBAL POINTS</span><h1>Leaderboard</h1><p>Every ranked wallet across pools, swaps, launches and referrals.</p></div><span className="leaderboard-count">{globalLeaderboardTotal} {leaderboardQuery.trim() ? 'matches' : 'players'}</span></div>
+          <div className="leaderboard-toolbar">
+            <label className="search-field"><span aria-hidden="true">⌕</span><input type="search" value={leaderboardQuery} onChange={(event) => updateLeaderboardQuery(event.target.value)} placeholder="Search wallet address or identity key" aria-label="Search leaderboard wallets" autoComplete="off" />{leaderboardQuery && <button type="button" onClick={() => updateLeaderboardQuery('')} aria-label="Clear wallet search">×</button>}</label>
+            <span>Ranks remain global in search results</span>
+          </div>
+          <div className="global-leaderboard">
+            <div className="global-leaderboard-head"><span>Rank</span><span>Wallet</span><span>Pool</span><span>Swap</span><span>Launch</span><span>Referral</span><span>Total</span></div>
+            {globalLeaderboard.map((item) => <div className={`global-leaderboard-row${item.identityKey === points?.identityKey ? ' current' : ''}`} key={item.identityKey}>
+              <b className="leaderboard-rank">#{item.rank}</b><code title={item.address}>{short(item.address, 8)}</code>
+              <span data-label="Pool">{comma(item.poolPoints)}</span><span data-label="Swap">{comma(item.swapPoints)}</span>
+              <span data-label="Launch">{comma((BigInt(item.launchPoints) + BigInt(item.launchTradePoints)).toString())}</span><span data-label="Referral">{comma(item.referralPoints)}</span>
+              <b className="leaderboard-total">{comma(item.total)} PTS</b>
+            </div>)}
+            {!globalLeaderboardLoading && !globalLeaderboardError && globalLeaderboard.length === 0 && <div className="empty-state">{leaderboardQuery.trim() ? `No ranked wallet matches “${leaderboardQuery.trim()}”.` : 'No scores yet.'}</div>}
+            {globalLeaderboardLoading && globalLeaderboard.length === 0 && <div className="empty-state"><Spinner /> Loading leaderboard…</div>}
+            {globalLeaderboardError && <div className="notice error"><b>Leaderboard unavailable</b><span>{globalLeaderboardError}</span></div>}
+          </div>
+          {globalLeaderboardOffset !== undefined && <button className="secondary load-more" disabled={globalLeaderboardLoading} onClick={() => void loadMoreLeaderboard()}>{globalLeaderboardLoading ? 'Loading…' : 'Load more players'}</button>}
         </section> : page === 'create' ? <section className="view-page create-page">
           <div className="view-heading"><div><span className="eyebrow"><i /> PERMISSIONLESS ASSETS</span><h1>Create</h1><p>Issue an Arkade asset or open a covenant-enforced liquidity pool from your own wallet.</p></div></div>
           <div className="create-tabs"><button className={createMode === 'asset' ? 'active' : ''} onClick={() => updateCreateMode('asset')}>Create asset</button><button className={createMode === 'pool' ? 'active' : ''} onClick={() => updateCreateMode('pool')}>Create pool</button></div>
@@ -1590,7 +1652,7 @@ function App() {
             <section className="points-score-card"><span>YOUR SCORE</span><div><b>{points ? comma(points.total) : '—'}</b><em>PTS</em></div><p>{points?.rank ? `Rank #${points.rank} of ${points.participants}` : 'Complete an eligible action to enter the ranking'}</p><small>Mutinynet points will migrate to Mainnet with the same wallet identity.</small><a href="https://docs.inscrib3.com/app/points" target="_blank" rel="noreferrer">Migration details ↗</a></section>
             <section className="points-breakdown"><div><span>POOL CREATION</span><b>{points ? comma(points.poolPoints) : '—'}</b><small>10 points per opened pool</small></div><div><span>SWAPS</span><b>{points ? comma(points.swapPoints) : '—'}</b><small>Minimum 1 · protocol fee sats</small></div><div><span>LAUNCH CREATION</span><b>{points ? comma(points.launchPoints) : '—'}</b><small>10 points per opened launch</small></div><div><span>LAUNCH TRADES</span><b>{points ? comma(points.launchTradePoints) : '—'}</b><small>Minimum 1 · protocol fee sats</small></div></section>
             <section className="referral-card"><div><span>REFERRALS</span><b>{points ? comma(points.referralPoints) : '—'} PTS</b><small>{points?.referredUsers ?? 0} referred wallets · +1 per opened pool, launch, or settled trade</small></div>{points && <><code>{`${window.location.origin}/?ref=${points.referralCode}`}</code><div><button onClick={() => window.open(`https://x.com/intent/post?text=${encodeURIComponent(`Try Inscrib3 App on Mutinynet and earn portable points: ${window.location.origin}/?ref=${points.referralCode}`)}`, '_blank', 'noopener,noreferrer')}>Share on X</button><button onClick={() => { void navigator.clipboard.writeText(`${window.location.origin}/?ref=${points.referralCode}`); window.open('https://discord.com/channels/@me', '_blank', 'noopener,noreferrer') }}>Copy for Discord</button></div></>}</section>
-            <section className="points-leaderboard"><div className="points-board-head"><span>TOP PLAYERS</span><small>LIVE</small></div>{leaderboard.length ? leaderboard.map((item) => <div className={item.identityKey === points?.identityKey ? 'current' : ''} key={item.identityKey}><i>#{item.rank}</i><code>{short(item.address, 5)}</code><b>{comma(item.total)} PTS</b></div>) : <p>No scores yet.</p>}</section>
+            <section className="points-leaderboard"><div className="points-board-head"><span>TOP PLAYERS</span><button onClick={() => navigate('leaderboard')}>View all →</button></div>{leaderboard.length ? leaderboard.map((item) => <div className={item.identityKey === points?.identityKey ? 'current' : ''} key={item.identityKey}><i>#{item.rank}</i><code>{short(item.address, 5)}</code><b>{comma(item.total)} PTS</b></div>) : <p>No scores yet.</p>}</section>
           </div>
           <div className="activity-panel">
             <div className="activity-head"><span>Type</span><span>Amount</span><span>Status</span><span>Transaction</span></div>
