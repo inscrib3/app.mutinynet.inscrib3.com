@@ -530,6 +530,7 @@ function App() {
   const [catalogAssets, setCatalogAssets] = useState<CatalogAsset[]>([])
   const [linkCopied, setLinkCopied] = useState(false)
   const [faucetCopied, setFaucetCopied] = useState(false)
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [slippage, setSlippage] = useState(50)
   const [showSettings, setShowSettings] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -725,6 +726,7 @@ function App() {
     if (nextPage === 'leaderboard' && leaderboardQuery.trim()) url.searchParams.set('q', leaderboardQuery.trim())
     window.history.pushState(null, '', `${url.pathname}${url.search}`)
     setPage(nextPage)
+    setMobileMenuOpen(false)
     if (nextPage === 'activity') { setActivity([]); setActivityCursor(undefined) }
     if (nextPage === 'pool' && entityId) setPoolId(entityId)
     if (nextPage === 'launch' && entityId) setLaunchId(entityId)
@@ -906,10 +908,18 @@ function App() {
   }, [setPoolId, setPage, setError])
 
   useEffect(() => {
+    if (!mobileMenuOpen) return
+    const close = (event: KeyboardEvent) => { if (event.key === 'Escape') setMobileMenuOpen(false) }
+    window.addEventListener('keydown', close)
+    return () => window.removeEventListener('keydown', close)
+  }, [mobileMenuOpen])
+
+  useEffect(() => {
     const onPopState = () => {
       const route = routeFromLocation()
       const params = new URLSearchParams(window.location.search)
       setPage(route.page)
+      setMobileMenuOpen(false)
       const nextPoolId = route.poolId ?? ''
       if (nextPoolId) setPoolId(nextPoolId)
       if (route.launchId) setLaunchId(route.launchId)
@@ -1416,9 +1426,17 @@ function App() {
     <div className="app-shell">
       <header>
         <button className="brand" onClick={() => navigate('swap')} aria-label="Inscrib3 app home"><img src="/logo.svg" alt="" /><span>INSCRIB3</span><small>APP</small></button>
-        <nav>{(['swap', 'launches', 'pools', 'create'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') || (item === 'launches' && (page === 'launch' || page === 'launch-create')) ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') runWithToast(refreshPools) }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}{NETWORK === 'mutinynet' && <button className={page === 'faucet' ? 'active' : ''} onClick={() => navigate('faucet')}>Faucet</button>}{(['leaderboard', 'activity'] as const).map((item) => <button key={item} className={page === item ? 'active' : ''} onClick={() => navigate(item)}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}<a className="nav-docs" href={DOCS_URL} target="_blank" rel="noreferrer">Docs ↗</a></nav>
-        <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span>{address && <button className="points-chip" onClick={() => navigate('activity')} title="Your portable points"><span>◆</span>{points ? comma(points.total) : '—'} PTS</button>}{address ? <span className={`wallet-address${walletOnWrongNetwork ? ' wrong-network' : ''}`} title={address}>{short(address, 4)}</span> : <button className="wallet-small" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Connect wallet'}</button>}</div>
+        <nav className="desktop-nav">{(['swap', 'launches', 'pools', 'create'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') || (item === 'launches' && (page === 'launch' || page === 'launch-create')) ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') runWithToast(refreshPools) }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}{NETWORK === 'mutinynet' && <button className={page === 'faucet' ? 'active' : ''} onClick={() => navigate('faucet')}>Faucet</button>}{(['leaderboard', 'activity'] as const).map((item) => <button key={item} className={page === item ? 'active' : ''} onClick={() => navigate(item)}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}<a className="nav-docs" href={DOCS_URL} target="_blank" rel="noreferrer">Docs ↗</a></nav>
+        <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span>{address && <button className="points-chip" onClick={() => navigate('activity')} title="Your portable points"><span>◆</span>{points ? comma(points.total) : '—'} PTS</button>}{address ? <span className={`wallet-address${walletOnWrongNetwork ? ' wrong-network' : ''}`} title={address}>{short(address, 4)}</span> : <button className="wallet-small" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Connect wallet'}</button>}<button className={`menu-toggle${mobileMenuOpen ? ' open' : ''}`} type="button" aria-label={mobileMenuOpen ? 'Close navigation menu' : 'Open navigation menu'} aria-expanded={mobileMenuOpen} aria-controls="mobile-navigation" onClick={() => setMobileMenuOpen((open) => !open)}><span /><span /><span /></button></div>
       </header>
+
+      {mobileMenuOpen && <div className="mobile-menu-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setMobileMenuOpen(false) }}>
+        <section className="mobile-menu" id="mobile-navigation" role="dialog" aria-modal="true" aria-label="Navigation menu">
+          <div className="mobile-menu-head"><div><span>NAVIGATION</span><b>Inscrib3 App</b></div><button type="button" onClick={() => setMobileMenuOpen(false)} aria-label="Close navigation menu">×</button></div>
+          <div className="mobile-menu-links">{(['swap', 'launches', 'pools', 'create'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') || (item === 'launches' && (page === 'launch' || page === 'launch-create')) ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') runWithToast(refreshPools) }}><span>{item[0]!.toUpperCase() + item.slice(1)}</span><i>→</i></button>)}{NETWORK === 'mutinynet' && <button className={page === 'faucet' ? 'active' : ''} onClick={() => navigate('faucet')}><span>Faucet</span><i>→</i></button>}{(['leaderboard', 'activity'] as const).map((item) => <button key={item} className={page === item ? 'active' : ''} onClick={() => navigate(item)}><span>{item[0]!.toUpperCase() + item.slice(1)}</span><i>→</i></button>)}</div>
+          <div className="mobile-menu-foot"><span><i /> {NETWORK_LABEL}</span><a href={DOCS_URL} target="_blank" rel="noreferrer">Documentation ↗</a></div>
+        </section>
+      </div>}
 
       {toast && <div className="toast error-toast" role="alert"><span>{toast}</span><button type="button" onClick={() => setToast('')} aria-label="Dismiss notification">×</button></div>}
 
