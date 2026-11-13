@@ -3,7 +3,7 @@ import './App.css'
 import { firstFormError, MAX_WALLET_AMOUNT, MIN_PROTOCOL_FEE_BPS, parseDisplayAmount, rawAmount, validateAssetForm, validatePoolForm, type AssetFormInput, type PoolFormInput } from './form-validation'
 import { loadSavedPayments, savePayment, type PaymentKind, type SavedPayment } from './open-payments'
 import { describeWalletError, errorMessage, MISSING_WALLET, WALLET_INSTALL_URL, type WalletIssue } from './wallet-issues'
-import { CreateLaunchPage, LaunchDetailPage, LaunchesPage } from './launches'
+import { CreateLaunchPage, LaunchDetailPage, LaunchesPage, type Launch } from './launches'
 
 const API = import.meta.env.VITE_API_URL ?? '/api'
 const NETWORK = import.meta.env.VITE_NETWORK ?? 'mutinynet'
@@ -485,6 +485,7 @@ function App() {
   const initialSwapMode = initialRoute.page === 'swap' && ['deposit', 'withdraw'].includes(initialParams.get('mode') ?? '') ? initialParams.get('mode') as 'deposit' | 'withdraw' : 'swap'
   const [mode, setMode] = useState<'swap' | 'deposit' | 'withdraw'>(initialSwapMode)
   const [pools, setPools] = useState<Pool[]>([])
+  const [onFireLaunch, setOnFireLaunch] = useState<Launch | null>(null)
   const [poolResults, setPoolResults] = useState<Pool[]>([])
   const [poolResultTotal, setPoolResultTotal] = useState(0)
   const [poolCursor, setPoolCursor] = useState<string | undefined>()
@@ -884,6 +885,15 @@ function App() {
         else if (linked && params.get('amount')) setAmount(params.get('amount')!)
       }
     }).catch((cause: unknown) => setError(errorMessage(cause)))
+  }, [])
+
+  useEffect(() => {
+    const load = () => api<PageResult<Launch>>('/v1/launches?sort=trending&limit=100')
+      .then((page) => setOnFireLaunch(page.items.find((item) => item.onFire) ?? null))
+      .catch(() => undefined)
+    void load()
+    const refresh = window.setInterval(() => void load(), 30_000)
+    return () => window.clearInterval(refresh)
   }, [])
 
   useEffect(() => {
@@ -1360,12 +1370,20 @@ function App() {
           <p>Swap BTC and Arkade assets through covenant-enforced liquidity. No bridges, no wrapped Bitcoin, no custody.</p>
         </section>
 
-        {onFirePool && onFireBase && onFireQuote && <section className="fire-route-banner">
-          <div className="fire-route-icon" aria-hidden="true">🔥</div>
-          <div className="marks"><TokenMark label={onFireBase.ticker} /><TokenMark label={onFireQuote.ticker} warm /></div>
-          <div className="fire-route-copy"><span>ON FIRE · TRENDING POOL</span><h2>{onFireBase.ticker} / {onFireQuote.ticker}</h2><p>{onFirePool.activity24h ?? 0} settled actions in the last 24 hours · {onFirePool.feeBps / 100}% total fee</p></div>
-          <button className="secondary" disabled={pool?.id === onFirePool.id && mode === 'swap'} onClick={() => switchToPool(onFirePool)}>{pool?.id === onFirePool.id && mode === 'swap' ? 'Active pair' : 'Switch to this pool'}</button>
-        </section>}
+        {(onFirePool && onFireBase && onFireQuote || onFireLaunch) && <div className="fire-route-grid">
+          {onFirePool && onFireBase && onFireQuote && <section className="fire-route-banner">
+            <div className="fire-route-icon" aria-hidden="true">🔥</div>
+            <div className="marks"><TokenMark label={onFireBase.ticker} /><TokenMark label={onFireQuote.ticker} warm /></div>
+            <div className="fire-route-copy"><span>ON FIRE · TRENDING POOL</span><h2>{onFireBase.ticker} / {onFireQuote.ticker}</h2><p>{onFirePool.activity24h ?? 0} settled actions in the last 24 hours · {onFirePool.feeBps / 100}% total fee</p></div>
+            <button className="secondary" disabled={pool?.id === onFirePool.id && mode === 'swap'} onClick={() => switchToPool(onFirePool)}>{pool?.id === onFirePool.id && mode === 'swap' ? 'Active pair' : 'Switch pool'}</button>
+          </section>}
+          {onFireLaunch && <section className="fire-route-banner launch-fire-route">
+            <div className="fire-route-icon" aria-hidden="true">🔥</div>
+            <div className="marks"><TokenMark label={onFireLaunch.ticker} warm /></div>
+            <div className="fire-route-copy"><span>ON FIRE · TRENDING LAUNCH</span><h2>{onFireLaunch.name} · ${onFireLaunch.ticker}</h2><p>{onFireLaunch.trades24h} settled trades · {displayAmount(onFireLaunch.volumeBtc24h, 8, 8)} BTC volume in 24h</p></div>
+            <button className="secondary" onClick={() => navigate('launch', onFireLaunch.id)}>View launch</button>
+          </section>}
+        </div>}
 
         {pool?.available && <PriceChart key={`swap-${pool.id}`} pool={pool} baseTicker={baseTicker} quoteTicker={quoteTicker} baseDecimals={baseDecimals} quoteDecimals={quoteDecimals} />}
 
