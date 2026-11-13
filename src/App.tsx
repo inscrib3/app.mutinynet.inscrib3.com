@@ -559,6 +559,8 @@ function App() {
   const liquidityRaw = rawAmount(liquidityAmount, mode === 'withdraw' ? lpDecimals : baseDecimals)
   const liquidityPreview = (() => {
     if (!pool?.baseReserve || !pool.quoteReserve || !pool.lpSupply || !liquidityRaw) return null
+    const poolIsEmpty = BigInt(pool.baseReserve) === 0n || BigInt(pool.lpSupply) === 0n
+    if (poolIsEmpty) return null
     if (mode === 'deposit') return {
       base: liquidityRaw, quote: (liquidityRaw * BigInt(pool.quoteReserve)) / BigInt(pool.baseReserve),
       lp: (liquidityRaw * BigInt(pool.lpSupply)) / BigInt(pool.baseReserve),
