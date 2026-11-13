@@ -249,6 +249,21 @@ async function issueAssetWithRetry(provider: ArkadeProvider, input: IssueAssetIn
   }
 }
 
+async function waitForWalletAssets(provider: ArkadeProvider, required: Array<{ assetId: string; amount: bigint }>, timeoutMs = 90_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    const assets = await provider.getAssets()
+    const ready = required.every((item) => {
+      const available = assets.filter((asset) => asset.assetId === item.assetId)
+        .reduce((total, asset) => total + BigInt(asset.amount), 0n)
+      return available >= item.amount
+    })
+    if (ready) return
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 1_500))
+  }
+  throw new Error('Issued assets are not spendable in the wallet yet. Wait a moment and retry; the saved asset IDs will be reused and no assets will be issued twice.')
+}
+
 function displayAmount(value: string | bigint, decimals: number, precision = 6): string {
   const raw = BigInt(value)
   if (decimals === 0) return raw.toLocaleString()
@@ -1043,9 +1058,15 @@ function App() {
     if (!window.arkade || !walletReady) throw new Error('Connect Inscrib3 Wallet on the correct network first.')
     await assertWalletNetwork(window.arkade)
     if (side === 'buy') return window.arkade.sendToAddress(contractAddress, walletNumber(fundingSats, 'launch buy funding'))
+    if (!tokenAssetId) throw new Error('Launch token asset ID is missing.')
+    if (side === 'bootstrap' && !controlAssetId) throw new Error('Launch control asset ID is missing.')
+    const required = side === 'sell'
+      ? [{ assetId: tokenAssetId, amount: input }]
+      : [{ assetId: tokenAssetId, amount: input }, { assetId: controlAssetId!, amount: 1n }]
+    await waitForWalletAssets(window.arkade, required)
     const assets = side === 'sell'
-      ? [{ assetId: tokenAssetId!, amount: walletNumber(input, 'launch token funding') }]
-      : [{ assetId: tokenAssetId!, amount: walletNumber(input, 'launch token supply') }, { assetId: controlAssetId!, amount: 1 }]
+      ? [{ assetId: tokenAssetId, amount: walletNumber(input, 'launch token funding') }]
+      : [{ assetId: tokenAssetId, amount: walletNumber(input, 'launch token supply') }, { assetId: controlAssetId!, amount: 1 }]
     return window.arkade.sendAsset(contractAddress, assets, walletNumber(fundingSats, 'launch contract satoshis'))
   }
 
