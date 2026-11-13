@@ -211,10 +211,20 @@ const comma = (value: string | bigint) => BigInt(value).toLocaleString()
 
 function ratio(numerator: bigint, denominator: bigint, precision = 8): string {
   if (denominator === 0n) return '—'
-  const scale = 10n ** BigInt(precision)
-  const scaled = (numerator * scale) / denominator
+  let displayPrecision = precision
+  let scale = 10n ** BigInt(displayPrecision)
+  let scaled = (numerator * scale) / denominator
+  // Eight decimal places are normally enough, but BTC-denominated prices can
+  // legitimately be smaller than one satoshi per whole token. Do not render
+  // those non-zero ratios as zero.
+  if (scaled === 0n && numerator !== 0n && displayPrecision < 18) {
+    displayPrecision = 18
+    scale = 10n ** BigInt(displayPrecision)
+    scaled = (numerator * scale) / denominator
+  }
+  if (scaled === 0n && numerator !== 0n) return `< 0.${'0'.repeat(displayPrecision - 1)}1`
   const whole = scaled / scale
-  const fraction = (scaled % scale).toString().padStart(precision, '0').replace(/0+$/, '')
+  const fraction = (scaled % scale).toString().padStart(displayPrecision, '0').replace(/0+$/, '')
   return fraction ? `${whole.toLocaleString()}.${fraction}` : whole.toLocaleString()
 }
 
