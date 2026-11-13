@@ -148,6 +148,7 @@ interface PoolCreation {
   fundingTxid?: string
   openingTxid?: string
 }
+interface PoolEligibility { eligible: boolean; assetId?: string; launchId?: string; phase?: string; reason?: string }
 
 type Page = 'swap' | 'launches' | 'launch' | 'launch-create' | 'pools' | 'pool' | 'create' | 'activity'
 
@@ -521,6 +522,7 @@ function App() {
   const [issuedAsset, setIssuedAsset] = useState<IssueAssetResult | null>(null)
   const [poolForm, setPoolForm] = useState(DEFAULT_POOL_FORM)
   const [poolCreation, setPoolCreation] = useState<PoolCreation | null>(null)
+  const [poolEligibility, setPoolEligibility] = useState<{ pair: string; result: PoolEligibility } | null>(null)
   const [poolAssetIssuance, setPoolAssetIssuance] = useState<PoolAssetIssuance | null>(null)
   const [creationStep, setCreationStep] = useState('')
   const [deployment, setDeployment] = useState<DeploymentInfo | null>(null)
@@ -610,6 +612,18 @@ function App() {
     creationFeeSats: BigInt(deployment?.poolCreationFeeSats ?? '0'),
     existingPairName: existingPair?.name,
   })
+  const poolPairKey = `${poolForm.baseAssetId}:${poolForm.quoteAssetId}`
+  useEffect(() => {
+    if (!poolForm.baseAssetId || !poolForm.quoteAssetId) return
+    const pair = `${poolForm.baseAssetId}:${poolForm.quoteAssetId}`
+    const controller = new AbortController()
+    void api<PoolEligibility>(`/v1/pool-eligibility?baseAssetId=${encodeURIComponent(poolForm.baseAssetId)}&quoteAssetId=${encodeURIComponent(poolForm.quoteAssetId)}`, { signal: controller.signal })
+      .then((result) => setPoolEligibility({ pair, result }))
+      .catch((cause: unknown) => {
+        if ((cause as Error).name !== 'AbortError') setPoolEligibility({ pair, result: { eligible: false, reason: `Unable to verify pool eligibility: ${errorMessage(cause)}` } })
+      })
+    return () => controller.abort()
+  }, [poolForm.baseAssetId, poolForm.quoteAssetId])
   const assetValidation = validateAssetForm(assetForm)
   const initialLiquiditySummary = creationBaseAmount && creationQuoteAmount && creationBaseDetails && creationQuoteDetails
     ? `${displayAmount(creationBaseAmount, creationBaseDetails.decimals, 8)} ${creationBaseDetails.ticker} + ${displayAmount(creationQuoteAmount, creationQuoteDetails.decimals, 8)} ${creationQuoteDetails.ticker}`
@@ -1098,6 +1112,10 @@ function App() {
     let fundingTxid: string | undefined
     try {
       await assertWalletNetwork(window.arkade)
+      setCreationStep('Checking asset eligibility')
+      const eligibility = await api<PoolEligibility>(`/v1/pool-eligibility?baseAssetId=${encodeURIComponent(poolForm.baseAssetId)}&quoteAssetId=${encodeURIComponent(poolForm.quoteAssetId)}`)
+      setPoolEligibility({ pair: `${poolForm.baseAssetId}:${poolForm.quoteAssetId}`, result: eligibility })
+      if (!eligibility.eligible) throw new Error(eligibility.reason ?? 'This asset pair cannot be used in a generic pool.')
       setCreationStep('Checking pair availability')
       const candidates = await api<PageResult<Pool>>(`/v1/pools?assetId=${encodeURIComponent(poolForm.baseAssetId)}&limit=100`)
       const duplicate = candidates.items.find((candidate) => candidate.lifecycle === 'active' && [candidate.baseAssetId, candidate.quoteAssetId].includes(poolForm.baseAssetId)
@@ -1257,8 +1275,11 @@ function App() {
   const swapBlocker = describeSwapBlocker()
   const liquidityBlocker = describeLiquidityBlocker()
   const assetFormBlocker = firstFormError(assetValidation.errors, ASSET_FIELD_LABELS)
+  const currentPoolEligibility = poolEligibility?.pair === poolPairKey ? poolEligibility.result : null
   const poolFormBlocker = !paymentsRestored ? 'Checking unfinished payments…'
     : poolOpeningPending ? 'Finish opening your funded pool first'
+    : poolForm.baseAssetId && poolForm.quoteAssetId && !currentPoolEligibility ? 'Checking whether this pair is eligible…'
+    : currentPoolEligibility && !currentPoolEligibility.eligible ? currentPoolEligibility.reason ?? 'This pair is reserved for the launch market'
     : deployment ? firstFormError(poolValidation.errors, POOL_FIELD_LABELS) : 'Pool creation is unavailable right now'
 
   function describeSwapBlocker(): string | null {
@@ -1530,6 +1551,7 @@ function App() {
                 <div><span>Total bootstrap funding</span><b title={bootstrapSummary?.total}>{bootstrapSummary?.total ?? 'Returned before payment'}</b></div>
                 <div><span>Stable Treasury Vault</span><code title={deployment?.platformTreasuryAddress}>{deployment ? short(deployment.platformTreasuryAddress, 8) : 'Unavailable'}</code></div>
               </div>
+              {currentPoolEligibility && !currentPoolEligibility.eligible && <div className="notice launch-pool-block"><b>Launch asset · generic pool blocked</b><span>{currentPoolEligibility.reason}. Launch assets trade only through their bonding curve and canonical permanent pool in Inscrib3.</span></div>}
               {controlledCreationAssets.length > 0 && <div className="notice asset-risk"><b>Reissuable asset warning</b><span>{controlledCreationAssets.map((asset) => `${asset.metadata?.ticker ?? short(asset.assetId)} · control ${short(asset.controlAssetId!, 8)}`).join(' · ')}. Additional supply may be issued by the control holder.</span></div>}
               <button className="primary" disabled={busy || connecting || (walletReady && poolFormBlocker !== null)} onClick={() => void createPool()}>{busy && <Spinner />}{walletActionLabel ?? poolFormBlocker ?? (poolAssetIssuance ? 'Resume pool creation' : 'Issue pool assets & open pool')}</button>
               {creationStep && <div className="creation-progress"><i className={poolCreation?.status === 'opened' ? 'done' : ''} /><span>{creationStep}</span></div>}
