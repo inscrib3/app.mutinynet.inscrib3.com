@@ -31,7 +31,8 @@ custodial deposit account.
 - create a permissionless pool from the browser;
 - inspect reserves, fees, recent activity, and controlled-supply warnings.
 - inspect decimal-normalized price charts from 1 minute through 30 days;
-- earn portable points for opened pools and settled swaps, and compete on the leaderboard.
+- earn portable points for opened pools and settled swaps, and compete on the leaderboard;
+- install the app as a PWA on supported desktop and mobile browsers.
 
 The busiest available pool can receive an **On fire** badge after at least three settled operations
 in a rolling 24-hour window. Closed historical pools are never promoted.
@@ -113,6 +114,10 @@ VITE_APP_URL=https://app.example.com
 `VITE_NETWORK` accepts `mutinynet` or `mainnet`. The app verifies both the API deployment and the
 connected Inscrib3 Wallet before allowing a transaction. The API must allow the app's exact origin
 through CORS.
+
+Production builds include a web app manifest and service worker. The service worker caches only the
+static app shell for installation and offline startup. API responses, wallet balances, quotes, and
+transaction requests remain network-only and are never served from the PWA cache.
 
 ## Scripts
 
