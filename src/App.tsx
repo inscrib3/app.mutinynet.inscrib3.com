@@ -21,6 +21,7 @@ const POOL_FIELD_LABELS: Partial<Record<keyof PoolFormInput, string>> = { quoteA
 const DEFAULT_POOL_FORM ={ id: '', name: '', baseAssetId: 'btc', quoteAssetId: '', baseAmount: '', quoteAmount: '', feeBps: '100', protocolFeeBps: String(MIN_PROTOCOL_FEE_BPS) }
 const DOCS_URL = 'https://docs.inscrib3.com/app/overview'
 const SOURCE_URL = 'https://github.com/inscrib3/app.mutinynet.inscrib3.com'
+const MUTINYNET_FAUCET_URL = 'https://faucet.mutinynet.com/'
 
 interface DeploymentInfo {
   ok: boolean
@@ -153,7 +154,7 @@ interface PoolCreation {
 }
 interface PoolEligibility { eligible: boolean; assetId?: string; launchId?: string; phase?: string; reason?: string }
 
-type Page = 'swap' | 'launches' | 'launch' | 'launch-create' | 'pools' | 'pool' | 'create' | 'leaderboard' | 'activity'
+type Page = 'swap' | 'launches' | 'launch' | 'launch-create' | 'pools' | 'pool' | 'create' | 'faucet' | 'leaderboard' | 'activity'
 
 function routeFromLocation(): { page: Page; poolId?: string; launchId?: string } {
   const parts = window.location.pathname.split('/').filter(Boolean)
@@ -163,6 +164,7 @@ function routeFromLocation(): { page: Page; poolId?: string; launchId?: string }
   if (parts[0] === 'pools' && parts[1]) return { page: 'pool', poolId: decodeURIComponent(parts[1]) }
   if (parts[0] === 'pools') return { page: 'pools' }
   if (parts[0] === 'create') return { page: 'create' }
+  if (parts[0] === 'faucet' && NETWORK === 'mutinynet') return { page: 'faucet' }
   if (parts[0] === 'leaderboard') return { page: 'leaderboard' }
   if (parts[0] === 'activity') return { page: 'activity' }
   return { page: 'swap' }
@@ -175,6 +177,7 @@ function pathForPage(page: Page, entityId?: string): string {
   if (page === 'pools') return '/pools'
   if (page === 'pool' && entityId) return `/pools/${encodeURIComponent(entityId)}`
   if (page === 'create') return '/create'
+  if (page === 'faucet') return '/faucet'
   if (page === 'leaderboard') return '/leaderboard'
   if (page === 'activity') return '/activity'
   return '/'
@@ -526,6 +529,7 @@ function App() {
   const [tokenSearch, setTokenSearch] = useState('')
   const [catalogAssets, setCatalogAssets] = useState<CatalogAsset[]>([])
   const [linkCopied, setLinkCopied] = useState(false)
+  const [faucetCopied, setFaucetCopied] = useState(false)
   const [slippage, setSlippage] = useState(50)
   const [showSettings, setShowSettings] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -732,6 +736,13 @@ function App() {
     const url = new URL('/pools', window.location.origin)
     if (value.trim()) url.searchParams.set('q', value.trim())
     window.history.replaceState(null, '', `${url.pathname}${url.search}`)
+  }
+
+  async function copyFaucetAddress() {
+    if (!address) return
+    await navigator.clipboard.writeText(address)
+    setFaucetCopied(true)
+    window.setTimeout(() => setFaucetCopied(false), 1_800)
   }
 
   function updateLeaderboardQuery(value: string) {
@@ -1405,7 +1416,7 @@ function App() {
     <div className="app-shell">
       <header>
         <button className="brand" onClick={() => navigate('swap')} aria-label="Inscrib3 app home"><img src="/logo.svg" alt="" /><span>INSCRIB3</span><small>APP</small></button>
-        <nav>{(['swap', 'launches', 'pools', 'create', 'leaderboard', 'activity'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') || (item === 'launches' && (page === 'launch' || page === 'launch-create')) ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') runWithToast(refreshPools) }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}<a className="nav-docs" href={DOCS_URL} target="_blank" rel="noreferrer">Docs ↗</a></nav>
+        <nav>{(['swap', 'launches', 'pools', 'create'] as const).map((item) => <button key={item} className={page === item || (item === 'pools' && page === 'pool') || (item === 'launches' && (page === 'launch' || page === 'launch-create')) ? 'active' : ''} onClick={() => { navigate(item); if (item === 'pools') runWithToast(refreshPools) }}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}{NETWORK === 'mutinynet' && <button className={page === 'faucet' ? 'active' : ''} onClick={() => navigate('faucet')}>Faucet</button>}{(['leaderboard', 'activity'] as const).map((item) => <button key={item} className={page === item ? 'active' : ''} onClick={() => navigate(item)}>{item[0]!.toUpperCase() + item.slice(1)}</button>)}<a className="nav-docs" href={DOCS_URL} target="_blank" rel="noreferrer">Docs ↗</a></nav>
         <div className="header-actions"><span className="network"><i /> {NETWORK_LABEL}</span>{address && <button className="points-chip" onClick={() => navigate('activity')} title="Your portable points"><span>◆</span>{points ? comma(points.total) : '—'} PTS</button>}{address ? <span className={`wallet-address${walletOnWrongNetwork ? ' wrong-network' : ''}`} title={address}>{short(address, 4)}</span> : <button className="wallet-small" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Connect wallet'}</button>}</div>
       </header>
 
@@ -1596,6 +1607,27 @@ function App() {
               {activityCursor && <button className="secondary load-more" onClick={() => runWithToast(loadMoreActivity)}>Load more activity</button>}
             </>
           })()}
+        </section> : page === 'faucet' ? <section className="view-page faucet-page">
+          <div className="faucet-hero">
+            <div className="faucet-orbit" aria-hidden="true"><span>₿</span><i /><i /><i /></div>
+            <div className="faucet-hero-copy"><span className="eyebrow"><i /> MUTINYNET TEST FUNDS</span><h1>Fund your wallet.<br /><em>Start building.</em></h1><p>Get free Mutinynet sats from the official faucet and receive them directly at your connected Arkade address.</p></div>
+            <a className="primary compact faucet-open" href={MUTINYNET_FAUCET_URL} target="_blank" rel="noreferrer">Open official faucet ↗</a>
+          </div>
+          <div className="faucet-layout">
+            <article className="faucet-address-card">
+              <div className="faucet-card-head"><div><span>DESTINATION</span><h2>Your Arkade address</h2></div><span className="faucet-official"><i /> MUTINYNET</span></div>
+              {!address ? <div className="faucet-connect"><p>Connect Inscrib3 Wallet to load the correct Mutinynet destination.</p><button className="secondary" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Connect wallet'}</button></div> : walletOnWrongNetwork ? <div className="notice asset-risk"><b>Wrong wallet network</b><span>Switch Inscrib3 Wallet to Mutinynet before requesting test funds.</span></div> : <>
+                <code className="faucet-address" title={address}>{address}</code>
+                <div className="faucet-address-actions"><button className="secondary" onClick={() => void copyFaucetAddress()}>{faucetCopied ? 'Address copied' : 'Copy address'}</button><a className="primary" href={MUTINYNET_FAUCET_URL} target="_blank" rel="noreferrer">Continue to faucet ↗</a></div>
+              </>}
+              <small>The faucet sends test sats directly to this address. Inscrib3 never receives your faucet credentials or wallet keys.</small>
+            </article>
+            <aside className="faucet-steps">
+              <span className="panel-label">HOW TO FUND</span>
+              <ol><li><b>1</b><div><strong>Copy your address</strong><span>Use the connected <code>tark1…</code> destination shown here.</span></div></li><li><b>2</b><div><strong>Sign in to Mutinynet</strong><span>Authentication is handled by the official faucet through GitHub.</span></div></li><li><b>3</b><div><strong>Select Arkade</strong><span>Paste the address, choose an amount and submit the request.</span></div></li><li><b>4</b><div><strong>Wait for your balance</strong><span>The wallet updates after the Arkade payment settles.</span></div></li></ol>
+              <div className="faucet-limit"><span>Official limit</span><b>1,000,000 sats / 24h</b><small>Applied per IP, user and destination by Mutinynet.</small></div>
+            </aside>
+          </div>
         </section> : page === 'leaderboard' ? <section className="view-page leaderboard-page">
           <div className="view-heading"><div><span className="eyebrow"><i /> GLOBAL POINTS</span><h1>Leaderboard</h1><p>Every ranked wallet across pools, swaps, launches and referrals.</p></div><span className="leaderboard-count">{globalLeaderboardTotal} {leaderboardQuery.trim() ? 'matches' : 'players'}</span></div>
           <div className="leaderboard-toolbar">
