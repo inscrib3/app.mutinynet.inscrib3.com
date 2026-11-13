@@ -204,10 +204,17 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, co
   const [launch, setLaunch] = useState<Launch | null>(null); const [trades, setTrades] = useState<LaunchTrade[]>([]); const [error, setError] = useState('')
   const [side, setSide] = useState<'buy' | 'sell'>('buy'); const [amount, setAmount] = useState(''); const [quote, setQuote] = useState<LaunchQuoteResponse | null>(null); const [quoteBusy, setQuoteBusy] = useState(false)
   const [tradeRequest, setTradeRequest] = useState<LaunchRequest | null>(null); const [tradeBusy, setTradeBusy] = useState(false)
+  const [reloadCount, setReloadCount] = useState(0)
   useEffect(() => { const controller = new AbortController(); Promise.all([
     request<Launch>(`/v1/launches/${encodeURIComponent(id)}`, { signal: controller.signal }),
     request<{ items: LaunchTrade[] }>(`/v1/launches/${encodeURIComponent(id)}/activity?limit=10`, { signal: controller.signal }),
-  ]).then(([next, activity]) => { setLaunch(next); setTrades(activity.items) }).catch((cause: unknown) => { if ((cause as Error).name !== 'AbortError') setError(cause instanceof Error ? cause.message : String(cause)) }); return () => controller.abort() }, [id])
+  ]).then(([next, activity]) => { setLaunch(next); setTrades(activity.items) }).catch((cause: unknown) => { if ((cause as Error).name !== 'AbortError') setError(cause instanceof Error ? cause.message : String(cause)) }); return () => controller.abort() }, [id, reloadCount])
+  // A finished trade changes reserves and activity, so the page reloads them.
+  function applyTradeRequest(next: LaunchRequest) {
+    setTradeRequest(next)
+    if (next.status === 'settled' || next.status === 'refunded') setReloadCount((count) => count + 1)
+  }
+  function clearTradeForm() { setAmount(''); setQuote(null) }
   async function previewQuote() {
     if (!amount || !/^\d+$/.test(amount) || BigInt(amount) <= 0n) { setError('Enter a positive integer raw amount.'); return }
     setQuoteBusy(true); setError('')
@@ -216,7 +223,7 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, co
   }
   useEffect(() => {
     if (!tradeRequest || !['funded', 'settling'].includes(tradeRequest.status)) return
-    const timer = window.setInterval(() => request<LaunchRequest>(`/v1/launch-requests/${tradeRequest.id}`).then(setTradeRequest).catch(() => undefined), 3_000)
+    const timer = window.setInterval(() => request<LaunchRequest>(`/v1/launch-requests/${tradeRequest.id}`).then(applyTradeRequest).catch(() => undefined), 3_000)
     return () => window.clearInterval(timer)
   }, [tradeRequest])
   async function trade() {
@@ -229,8 +236,8 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, co
       }) });
       setTradeRequest(intent)
       fundingTxid = await fundContract(intent.contractAddress, side, BigInt(intent.inputAmount), BigInt(intent.fundingSats), launch.assetId)
-      setTradeRequest({ ...intent, fundingTxid })
-      setTradeRequest(await request<LaunchRequest>(`/v1/launch-requests/${intent.id}/funding`, { method: 'POST', body: JSON.stringify({ txid: fundingTxid }) }))
+      setTradeRequest({ ...intent, fundingTxid }); clearTradeForm()
+      applyTradeRequest(await request<LaunchRequest>(`/v1/launch-requests/${intent.id}/funding`, { method: 'POST', body: JSON.stringify({ txid: fundingTxid }) }))
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause)
       setError(fundingTxid ? `Payment ${short(fundingTxid, 7)} was sent. Do not pay again; retry registration or refund after synchronization. ${message}` : message)
@@ -238,23 +245,28 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, co
   }
   async function refundTrade() {
     if (!tradeRequest) return; setTradeBusy(true); setError('')
-    try { setTradeRequest(await request<LaunchRequest>(`/v1/launch-requests/${tradeRequest.id}/refund`, { method: 'POST' })) }
+    try { applyTradeRequest(await request<LaunchRequest>(`/v1/launch-requests/${tradeRequest.id}/refund`, { method: 'POST' })) }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setTradeBusy(false) }
   }
   if (error && !launch) return <section className="view-page"><button className="back-link" onClick={onBack}>← All launches</button><div className="notice error"><b>Launch unavailable</b><span>{error}</span></div></section>
   if (!launch) return <section className="view-page"><div className="empty-state">Reading the launch…</div></section>
   const curveOpen = launch.phase === 'curve'
+  const tradeInProgress = Boolean(tradeRequest && !['settled', 'refunded', 'failed'].includes(tradeRequest.status))
+  // Connecting needs no quote; funding a trade does.
+  const tradeButtonDisabled = tradeBusy || (Boolean(walletAddress) && (!quote || tradeInProgress))
   return <section className="view-page launch-detail-page">
     <div className="launch-detail-hero"><button className="back-link" onClick={onBack}>← All launches</button><div className="launch-detail-title"><LaunchMark launch={launch} /><div><span className="eyebrow"><i /> {launch.protocolGeneration ?? 'CURVE-V1'}</span><h1>{launch.name}</h1><p>${launch.ticker} · created by <code>{short(launch.creatorAddress, 8)}</code></p></div></div><div className="launch-card-badges">{launch.onFire && <span className="fire-badge" title={`${launch.trades24h} settled trades in the last 24 hours`}>🔥 On fire</span>}<PhasePill phase={launch.phase} /></div></div>
     <div className="metric-grid"><div><span>Graduation</span><b>{(launch.progressBps / 100).toFixed(2)}%</b><small>{btc(launch.realBtcReserve)} of {btc(launch.economics.graduationThreshold)}</small></div><div><span>Available on curve</span><b>{compact(launch.sellableTokens)}</b><small>${launch.ticker} raw units</small></div><div><span>Activity · 24h</span><b>{btc(launch.volumeBtc24h)}</b><small>{launch.trades24h.toLocaleString()} settled trades</small></div><div><span>Total fee</span><b>{((launch.economics.creatorFeeBps + launch.economics.protocolFeeBps) / 100).toFixed(2)}%</b><small>{launch.economics.creatorFeeBps / 100}% creator · {launch.economics.protocolFeeBps / 100}% protocol</small></div></div>
     <LaunchPriceChart launch={launch} />
     <div className="launch-detail-grid"><article className="token-detail-card"><div className="token-detail-head"><LaunchMark launch={launch} /><div><h2>Launch terms</h2><span>Immutable economics snapshot</span></div></div><dl><div><dt>Total supply</dt><dd>{compact(launch.economics.supply)}</dd></div><div><dt>Reserved for pool</dt><dd>{compact(launch.economics.reservedTokens)}</dd></div><div><dt>Virtual BTC</dt><dd>{btc(launch.economics.virtualBtc)}</dd></div><div><dt>Asset ID</dt><dd><code>{launch.assetId ? short(launch.assetId, 10) : 'Preparing'}</code></dd></div><div><dt>Protocol</dt><dd><code>{launch.protocolGeneration}</code></dd></div></dl></article>
-      <article className="launch-trade-card"><span className="panel-label">{curveOpen ? 'CURVE QUOTE' : launch.phase === 'pool' ? 'POOL QUOTE' : 'LAUNCH STATUS'}</span><h2>{curveOpen ? `Preview ${launch.ticker}` : launch.phase === 'pool' ? 'Graduated pool preview' : 'Trading is not open'}</h2><p>Exact integer quote from the indexed reserves. A funding contract is created only after wallet review.</p>{(curveOpen || launch.phase === 'pool') && <><div className="launch-side-tabs"><button className={side === 'buy' ? 'active' : ''} onClick={() => { setSide('buy'); setQuote(null) }}>Buy</button><button className={side === 'sell' ? 'active' : ''} onClick={() => { setSide('sell'); setQuote(null) }}>Sell</button></div><label className="launch-quote-input"><span>{side === 'buy' ? 'Satoshis in' : `${launch.ticker} raw units in`}</span><input value={amount} onChange={(event) => { setAmount(event.target.value); setQuote(null) }} inputMode="numeric" placeholder="0" /></label><button className="secondary full" onClick={() => void previewQuote()} disabled={quoteBusy || tradeBusy}>{quoteBusy ? 'Calculating…' : 'Preview quote'}</button>{quote && <div className="launch-quote-result"><div><span>Output</span><b>{compact(quote.quote.outputAmount)} {side === 'buy' ? launch.ticker : 'sats'}</b></div><div><span>Total fees</span><b>{compact(BigInt(quote.quote.creatorFee) + BigInt(quote.quote.protocolFee))} sats</b></div>{BigInt(quote.quote.refundAmount) > 0n && <div><span>Final-fill refund</span><b>{compact(quote.quote.refundAmount)} sats</b></div>}{quote.quote.graduates && <strong>This buy reaches graduation.</strong>}</div>}</>}{tradingEnabled ? <button className="primary" onClick={() => void trade()} disabled={tradeBusy || !quote || Boolean(tradeRequest && !['settled', 'refunded', 'failed'].includes(tradeRequest.status))}>{tradeBusy ? 'Waiting for wallet…' : !walletAddress ? 'Connect wallet' : 'Review & fund trade'}</button> : <button className="primary launch-disabled" disabled>Wallet trading disabled until funded validation</button>}{tradeRequest && <div className="launch-request-status"><b>{tradeRequest.status.replace('-', ' ')}</b><span>{tradeRequest.settlementTxid ? short(tradeRequest.settlementTxid, 8) : tradeRequest.fundingTxid ? short(tradeRequest.fundingTxid, 8) : 'Waiting for wallet funding'}</span>{tradeRequest.status === 'funded' && <button className="secondary full" onClick={() => void refundTrade()} disabled={tradeBusy}>Refund funding</button>}</div>}<small>Never fund an address shown outside a wallet transaction preview.</small></article></div>
+      <article className="launch-trade-card"><span className="panel-label">{curveOpen ? 'CURVE QUOTE' : launch.phase === 'pool' ? 'POOL QUOTE' : 'LAUNCH STATUS'}</span><h2>{curveOpen ? `Preview ${launch.ticker}` : launch.phase === 'pool' ? 'Graduated pool preview' : 'Trading is not open'}</h2><p>Exact integer quote from the indexed reserves. A funding contract is created only after wallet review.</p>{(curveOpen || launch.phase === 'pool') && <><div className="launch-side-tabs"><button className={side === 'buy' ? 'active' : ''} onClick={() => { setSide('buy'); setQuote(null) }}>Buy</button><button className={side === 'sell' ? 'active' : ''} onClick={() => { setSide('sell'); setQuote(null) }}>Sell</button></div><label className="launch-quote-input"><span>{side === 'buy' ? 'Satoshis in' : `${launch.ticker} raw units in`}</span><input value={amount} onChange={(event) => { setAmount(event.target.value); setQuote(null) }} inputMode="numeric" placeholder="0" /></label><button className="secondary full" onClick={() => void previewQuote()} disabled={quoteBusy || tradeBusy}>{quoteBusy ? 'Calculating…' : 'Preview quote'}</button>{quote && <div className="launch-quote-result"><div><span>Output</span><b>{compact(quote.quote.outputAmount)} {side === 'buy' ? launch.ticker : 'sats'}</b></div><div><span>Total fees</span><b>{compact(BigInt(quote.quote.creatorFee) + BigInt(quote.quote.protocolFee))} sats</b></div>{BigInt(quote.quote.refundAmount) > 0n && <div><span>Final-fill refund</span><b>{compact(quote.quote.refundAmount)} sats</b></div>}{quote.quote.graduates && <strong>This buy reaches graduation.</strong>}</div>}</>}{tradingEnabled ? <button className="primary" onClick={() => void trade()} disabled={tradeButtonDisabled}>{tradeBusy ? 'Waiting for wallet…' : !walletAddress ? 'Connect wallet' : 'Review & fund trade'}</button> : <button className="primary launch-disabled" disabled>Wallet trading disabled until funded validation</button>}{tradeRequest && <div className="launch-request-status"><b>{tradeRequest.status.replace('-', ' ')}</b><span>{tradeRequest.settlementTxid ? short(tradeRequest.settlementTxid, 8) : tradeRequest.fundingTxid ? short(tradeRequest.fundingTxid, 8) : 'Waiting for wallet funding'}</span>{tradeRequest.status === 'funded' && <button className="secondary full" onClick={() => void refundTrade()} disabled={tradeBusy}>Refund funding</button>}</div>}<small>Never fund an address shown outside a wallet transaction preview.</small></article></div>
     {error && <div className="notice error"><b>Quote unavailable</b><span>{error}</span></div>}<div className="notice asset-risk"><b>Experimental launch</b><span>Names and tickers are not unique. Verify the asset ID, fee policy, holder concentration and wallet transaction before signing.</span></div>
     <div className="activity-section-heading"><div><span className="eyebrow"><i /> INDEXED SETTLEMENTS</span><h2>Launch activity</h2><p>Verified curve and graduated-pool trades.</p></div></div><div className="activity-panel"><div className="activity-head"><span>Side</span><span>Input → output</span><span>Venue</span><span>Transaction</span></div>{trades.length === 0 ? <div className="empty-state">No indexed trades yet.</div> : trades.map((trade) => <div className="activity-row" key={trade.id}><div><span className="activity-icon">↔</span><div><b>{trade.side === 'buy' ? 'Buy' : 'Sell'} {launch.ticker}</b><small>{new Date(trade.createdAt).toLocaleString()}</small></div></div><code>{compact(trade.inputAmount)} → {compact(trade.outputAmount)}</code><span className="status-pill settled">{trade.venue}</span><code title={trade.txid}>{short(trade.txid, 7)}</code></div>)}</div>
   </section>
 }
 
+// Fields the curve simulation depends on; editing one makes the shown simulation stale.
+const SIMULATED_FIELDS: Array<keyof typeof DEFAULT_FORM> = ['supply', 'virtualBtc', 'graduationThreshold', 'creatorFeeBps', 'protocolFeeBps', 'buyAmount']
 const DEFAULT_FORM = { id: '', name: '', ticker: '', description: '', supply: '1000000000', decimals: '0', virtualBtc: '1000000', graduationThreshold: '9000000', creatorFeeBps: '70', protocolFeeBps: '30', buyAmount: '100000' }
 
 export function CreateLaunchPage({ onBack, tradingEnabled, walletAddress, connectWallet, issueAsset, fundContract, onOpened, referralCode }: {
@@ -263,12 +275,16 @@ export function CreateLaunchPage({ onBack, tradingEnabled, walletAddress, connec
   fundContract: FundContract; onOpened: (id: string) => void; referralCode?: string
 }) {
   const [form, setForm] = useState(DEFAULT_FORM); const [simulation, setSimulation] = useState<Simulation | null>(null); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [progress, setProgress] = useState('')
-  const field = (key: keyof typeof form) => (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setForm({ ...form, [key]: event.target.value })
+  const [simulating, setSimulating] = useState(false)
+  const field = (key: keyof typeof form) => (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
+    setForm({ ...form, [key]: event.target.value })
+    if (SIMULATED_FIELDS.includes(key)) setSimulation(null)
+  }
   async function simulate() {
-    setBusy(true); setError('')
+    setSimulating(true); setError('')
     try { setSimulation(await request<Simulation>('/v1/launches/simulate', { method: 'POST', body: JSON.stringify({ supply: form.supply, virtualBtc: form.virtualBtc,
       graduationThreshold: form.graduationThreshold, creatorFeeBps: form.creatorFeeBps, protocolFeeBps: form.protocolFeeBps, ...(form.buyAmount ? { buyAmount: form.buyAmount } : {}) }) })) }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setSimulation(null) } finally { setBusy(false) }
+    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setSimulation(null) } finally { setSimulating(false) }
   }
   async function createLaunch() {
     if (!walletAddress) { connectWallet(); return }
@@ -305,9 +321,9 @@ export function CreateLaunchPage({ onBack, tradingEnabled, walletAddress, connec
     <div className="view-heading"><div><span className="eyebrow"><i /> CURVE-V1</span><h1>Create launch</h1><p>Model fixed-supply curve economics before any wallet transaction exists.</p></div><button className="secondary" onClick={onBack}>Back to launches</button></div>
     <div className="create-layout"><article className="create-card"><div className="card-head"><div><h2>Launch configuration</h2><span>All monetary fields below are integer raw units or satoshis</span></div></div>
       <div className="form-grid"><label><span>Launch ID</span><input value={form.id} onChange={field('id')} placeholder="my-bitcoin-asset" /></label><label><span>Name</span><input value={form.name} onChange={field('name')} placeholder="My Bitcoin Asset" /></label><label><span>Ticker</span><input value={form.ticker} onChange={field('ticker')} placeholder="TOKEN" maxLength={16} /></label><label><span>Decimals</span><input value={form.decimals} onChange={field('decimals')} inputMode="numeric" /></label><label className="wide"><span>Description</span><textarea value={form.description} onChange={field('description')} placeholder="What is this launch?" /></label><label><span>Fixed supply</span><input value={form.supply} onChange={field('supply')} inputMode="numeric" /></label><label><span>Initial buy · sats</span><input value={form.buyAmount} onChange={field('buyAmount')} inputMode="numeric" /></label><label><span>Virtual BTC · sats</span><input value={form.virtualBtc} onChange={field('virtualBtc')} inputMode="numeric" /></label><label><span>Graduation threshold · sats</span><input value={form.graduationThreshold} onChange={field('graduationThreshold')} inputMode="numeric" /></label><label><span>Creator fee · bps</span><input value={form.creatorFeeBps} onChange={field('creatorFeeBps')} inputMode="numeric" /></label><label><span>Protocol fee · bps</span><input value={form.protocolFeeBps} onChange={field('protocolFeeBps')} inputMode="numeric" /></label></div>
-      <button className="primary" onClick={() => void simulate()} disabled={busy}>{busy ? 'Calculating…' : 'Simulate exact curve'}</button>{error && <div className="notice error"><b>{progress ? 'Launch action failed' : 'Invalid economics'}</b><span>{error}</span></div>}
+      <button className="primary" onClick={() => void simulate()} disabled={busy || simulating}>{simulating ? 'Calculating…' : 'Simulate exact curve'}</button>{error && <div className="notice error"><b>{progress ? 'Launch action failed' : 'Invalid economics'}</b><span>{error}</span></div>}
       {simulation && <div className="launch-simulation"><div><span>Sellable on curve</span><b>{compact(simulation.sellableTokens)}</b></div><div><span>Reserved for pool</span><b>{compact(simulation.reservedTokens)}</b></div><div><span>Initial buy output</span><b>{simulation.quote ? compact(simulation.quote.outputAmount) : '—'}</b></div><div><span>Initial buy fees</span><b>{simulation.quote ? `${compact(BigInt(simulation.quote.creatorFee) + BigInt(simulation.quote.protocolFee))} sats` : '—'}</b></div></div>}
-      {progress && <div className="creation-progress">{progress}</div>}{tradingEnabled ? <button className="primary" onClick={() => void createLaunch()} disabled={busy}>{busy ? 'Waiting for wallet…' : !walletAddress ? 'Connect wallet' : 'Issue assets & open launch'}</button> : <button className="primary launch-disabled" disabled>Wallet launch disabled until funded validation</button>}
+      {progress && <div className="creation-progress">{progress}</div>}{tradingEnabled ? <button className="primary" onClick={() => void createLaunch()} disabled={busy || simulating}>{busy ? 'Waiting for wallet…' : !walletAddress ? 'Connect wallet' : 'Issue assets & open launch'}</button> : <button className="primary launch-disabled" disabled>Wallet launch disabled until funded validation</button>}
     </article><aside className="create-info"><span className="panel-label">RELEASE GATE</span><h3>No unvalidated funding addresses</h3><p>The simulator uses the same integer arithmetic intended for the covenant. Asset issuance and funding remain unavailable until the complete path passes emulator and funded Mutinynet tests.</p><ul><li>Buy and sell symmetry</li><li>Final partial fill and refund</li><li>Permissionless graduation</li><li>Permanent liquidity lock</li><li>Timed recovery without stranded funds</li></ul></aside></div>
   </section>
 }
