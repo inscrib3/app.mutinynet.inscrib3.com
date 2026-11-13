@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
 import { firstFormError, MAX_WALLET_AMOUNT, MIN_PROTOCOL_FEE_BPS, parseDisplayAmount, rawAmount, validateAssetForm, validatePoolForm, type AssetFormInput, type PoolFormInput } from './form-validation'
 import { loadSavedPayments, savePayment, type PaymentKind, type SavedPayment } from './open-payments'
-import { describeWalletError, errorMessage, MISSING_WALLET, WALLET_INSTALL_URL, type WalletIssue } from './wallet-issues'
+import { describeWalletError, errorMessage, WALLET_INSTALL_URL, type WalletIssue } from './wallet-issues'
 import { CreateLaunchPage, LaunchDetailPage, LaunchesPage, type Launch } from './launches'
+import { connectWithPwaWallet, reservePwaWalletPopup, sendBtcWithPwaWallet } from './pwa-wallet'
 
 const API = import.meta.env.VITE_API_URL ?? '/api'
 const NETWORK = import.meta.env.VITE_NETWORK ?? 'mutinynet'
@@ -208,6 +209,7 @@ interface ArkadeProvider {
 }
 
 declare global { interface Window { arkade?: ArkadeProvider } }
+type WalletMode = 'extension' | 'pwa'
 
 const short = (value: string, edge = 5) => value.length > edge * 2 ? `${value.slice(0, edge)}…${value.slice(-edge)}` : value
 const comma = (value: string | bigint) => BigInt(value).toLocaleString()
@@ -515,6 +517,7 @@ function App() {
   const [poolId, setPoolId] = useState(initialRoute.poolId ?? '')
   const [launchId, setLaunchId] = useState(initialRoute.launchId ?? '')
   const [address, setAddress] = useState('')
+  const [walletMode, setWalletMode] = useState<WalletMode | null>(null)
   const [assets, setAssets] = useState<AssetInfo[]>([])
   const [btcBalance, setBtcBalance] = useState(0)
   const [sellAssetId, setSellAssetId] = useState('btc')
@@ -579,6 +582,7 @@ function App() {
   const sellAmountCheck = parseDisplayAmount(amount, sellDecimals)
   const walletOnWrongNetwork = walletNetwork !== null && walletNetwork.network !== WALLET_NETWORK
   const walletReady = Boolean(address) && !walletOnWrongNetwork
+  const popupWallet = walletMode === 'pwa'
   const swapLocked = isRequestLocked(request)
   const liquidityLocked = isRequestLocked(liquidityRequest)
   const poolOpeningPending = poolCreation?.status === 'awaiting-funding' && Boolean(poolCreation.fundingTxid)
@@ -831,16 +835,16 @@ function App() {
   }
 
   const refreshAssets = useCallback(async () => {
-    if (!window.arkade || !address || walletOnWrongNetwork) return
+    if (walletMode !== 'extension' || !window.arkade || !address || walletOnWrongNetwork) return
     const [nextAssets, nextBalance] = await Promise.all([window.arkade.getAssets(), window.arkade.getBalance()])
     assertProviderAmounts(nextAssets, nextBalance)
     setAssets(nextAssets); setBtcBalance(nextBalance.available)
-  }, [address, walletOnWrongNetwork, setAssets, setBtcBalance])
+  }, [address, walletMode, walletOnWrongNetwork, setAssets, setBtcBalance])
 
   const loadWallet = useCallback(async (provider: ArkadeProvider, knownAddress?: string) => {
     const network = await provider.getNetwork()
     const nextAddress = knownAddress ?? await provider.getAddress()
-    setWalletNetwork(network); setAddress(nextAddress); setWalletIssue(null); setShowSwitchSteps(false)
+    setWalletMode('extension'); setWalletNetwork(network); setAddress(nextAddress); setWalletIssue(null); setShowSwitchSteps(false)
     if (network.network !== WALLET_NETWORK) { setAssets([]); setBtcBalance(0); return }
     const [nextAssets, nextBalance] = await Promise.all([provider.getAssets(), provider.getBalance()])
     assertProviderAmounts(nextAssets, nextBalance)
@@ -1017,12 +1021,12 @@ function App() {
 
   useEffect(() => {
     const provider = window.arkade
-    if (!provider || !address) return
+    if (walletMode !== 'extension' || !provider || !address) return
     const sync = () => void loadWallet(provider).catch(showWalletError)
     provider.on('accountChanged', sync)
     provider.on('networkChanged', sync)
     return () => { provider.off('accountChanged', sync); provider.off('networkChanged', sync) }
-  }, [address, loadWallet, showWalletError])
+  }, [address, loadWallet, showWalletError, walletMode])
 
   // The unlock listener must call the current connect(), not the one from the render that subscribed.
   const latestConnect = useRef(connect)
@@ -1130,10 +1134,20 @@ function App() {
   }, [page, address, refreshWalletActivity])
 
   async function connect() {
-    const provider = window.arkade
-    if (!provider) { setWalletIssue(MISSING_WALLET); return }
+    const provider = window.arkade?.isArkade === true ? window.arkade : undefined
     setConnecting(true); setWalletIssue(null)
     try {
+      if (!provider) {
+        const [connected] = await connectWithPwaWallet()
+        if (!connected) throw new Error('Wallet returned no active account')
+        const expectedPrefix = NETWORK === 'mainnet' ? 'ark1' : 'tark1'
+        if (!connected.toLowerCase().startsWith(expectedPrefix)) {
+          throw new Error(`The wallet popup returned an address for another network. Open Inscrib3 Wallet, switch to ${APP_NETWORK_NAME}, and try again.`)
+        }
+        setPoints(null); setLeaderboard([]); setAssets([]); setBtcBalance(0)
+        setWalletMode('pwa'); setAddress(connected); setWalletNetwork({ network: WALLET_NETWORK, displayName: APP_NETWORK_NAME, isTestnet: NETWORK !== 'mainnet', arkServerUrl: '' })
+        return
+      }
       // A locked wallet opens its own unlock window (older versions answer
       // "Wallet is locked", which shows the unlock banner instead).
       const [connected] = await provider.connect()
@@ -1156,17 +1170,31 @@ function App() {
     return address ? switchWalletNetwork() : connect()
   }
 
+  async function sendWalletBtc(addressToPay: string, amount: bigint, label: string, popup?: Window): Promise<string> {
+    const safeAmount = walletNumber(amount, label)
+    if (popupWallet) {
+      if (!popup) throw new Error('Open the wallet popup directly from the payment button and try again.')
+      return sendBtcWithPwaWallet(addressToPay, safeAmount, popup)
+    }
+    if (!window.arkade) throw new Error('Connect Inscrib3 Wallet first.')
+    await assertWalletNetwork(window.arkade)
+    return window.arkade.sendToAddress(addressToPay, safeAmount)
+  }
+
   async function issueLaunchAsset(input: { amount: bigint; metadata: { name?: string; ticker: string; decimals: number } }): Promise<IssueAssetResult> {
+    if (popupWallet) throw new Error('Asset issuance requires the Inscrib3 Wallet browser extension. The wallet popup supports connecting and BTC sends only.')
     if (!window.arkade || !walletReady) throw new Error('Connect Inscrib3 Wallet on the correct network first.')
     await assertWalletNetwork(window.arkade)
     return issueAssetWithRetry(window.arkade, { amount: walletNumber(input.amount, 'launch asset supply'), metadata: input.metadata }, () => undefined)
   }
 
   async function fundLaunchContract(contractAddress: string, side: 'buy' | 'sell' | 'bootstrap', input: bigint,
-    fundingSats: bigint, tokenAssetId?: string, controlAssetId?: string): Promise<string> {
-    if (!window.arkade || !walletReady) throw new Error('Connect Inscrib3 Wallet on the correct network first.')
+    fundingSats: bigint, tokenAssetId?: string, controlAssetId?: string, popup?: Window): Promise<string> {
+    if (!walletReady) throw new Error('Connect Inscrib3 Wallet on the correct network first.')
+    if (side === 'buy') return sendWalletBtc(contractAddress, fundingSats, 'launch buy funding', popup)
+    if (popupWallet) throw new Error('Sending Arkade assets requires the Inscrib3 Wallet browser extension. The wallet popup supports BTC sends only.')
+    if (!window.arkade) throw new Error('Connect the Inscrib3 Wallet browser extension first.')
     await assertWalletNetwork(window.arkade)
-    if (side === 'buy') return window.arkade.sendToAddress(contractAddress, walletNumber(fundingSats, 'launch buy funding'))
     if (!tokenAssetId) throw new Error('Launch token asset ID is missing.')
     if (side === 'bootstrap' && !controlAssetId) throw new Error('Launch control asset ID is missing.')
     const required = side === 'sell'
@@ -1181,6 +1209,7 @@ function App() {
 
   async function createAsset() {
     if (!walletReady) return requireWallet()
+    if (popupWallet) { setError('Asset issuance requires the Inscrib3 Wallet browser extension.'); return }
     const valid = assetValidation.valid
     if (!window.arkade || !valid) return
     setBusy(true); setError(''); setIssuedAsset(null); setCreationStep('Approve asset issuance in Inscrib3 Wallet')
@@ -1197,6 +1226,7 @@ function App() {
 
   async function createPool() {
     if (!walletReady) return requireWallet()
+    if (popupWallet) { setError('Pool creation requires the Inscrib3 Wallet browser extension.'); return }
     if (!window.arkade || !deployment) { if (!deployment) setError('Deployment configuration is not available.'); return }
     const valid = poolValidation.valid
     if (!valid || !creationBaseDetails || !poolForm.id || !poolForm.name) return
@@ -1296,11 +1326,15 @@ function App() {
 
   async function swap() {
     if (!walletReady) return requireWallet()
-    if (!pool || !raw || !quote || !window.arkade || swapBlocker) return
+    if (!pool || !raw || !quote || swapBlocker) return
+    if (!popupWallet && !window.arkade) return
+    let walletPopup: Window | undefined
+    try { if (popupWallet) walletPopup = reservePwaWalletPopup() }
+    catch (cause) { setError(errorMessage(cause)); return }
     setBusy(true); setError(''); setRequest(null)
-    let fundingTxid: string | undefined
+    let fundingTxid: string | undefined; let fundingStarted = false
     try {
-      await assertWalletNetwork(window.arkade)
+      if (window.arkade && !popupWallet) await assertWalletNetwork(window.arkade)
       const minOutput = quoteMode === 'output' && receiveRaw
         ? receiveRaw
         : (BigInt(quote.outputAmount) * BigInt(10_000 - slippage)) / 10_000n
@@ -1310,11 +1344,12 @@ function App() {
       })
       setRequest(intent)
       const fundingSats = walletNumber(BigInt(intent.fundingSats), 'swap BTC funding')
+      fundingStarted = true
       fundingTxid = sellAssetId === 'btc'
-        ? await window.arkade.sendToAddress(intent.contractAddress, fundingSats)
-        : await window.arkade.sendAsset(intent.contractAddress, [{ assetId: sellAssetId, amount: walletNumber(raw, 'asset funding') }], fundingSats)
+        ? await sendWalletBtc(intent.contractAddress, BigInt(intent.fundingSats), 'swap BTC funding', walletPopup)
+        : await window.arkade!.sendAsset(intent.contractAddress, [{ assetId: sellAssetId, amount: walletNumber(raw, 'asset funding') }], fundingSats)
       setRequest(await registerFunding<SwapRequest>(`/v1/swaps/${intent.id}`, fundingTxid))
-    } catch (cause) { reportFundingFailure(cause, fundingTxid, setRequest) }
+    } catch (cause) { if (!fundingStarted && walletPopup && !walletPopup.closed) walletPopup.close(); reportFundingFailure(cause, fundingTxid, setRequest) }
     finally { setBusy(false) }
   }
 
@@ -1343,6 +1378,7 @@ function App() {
 
   async function submitLiquidity() {
     if (!walletReady) return requireWallet()
+    if (popupWallet) { setError('Liquidity operations require the Inscrib3 Wallet browser extension.'); return }
     if (!pool || !liquidityRaw || !liquidityPreview || !window.arkade || mode === 'swap' || liquidityBlocker) return
     setBusy(true); setError(''); setLiquidityRequest(null)
     let fundingTxid: string | undefined
@@ -1363,15 +1399,16 @@ function App() {
     finally { setBusy(false) }
   }
 
-  const balance = sellAssetId === 'btc' ? displayAmount(BigInt(btcBalance), 8, 8) : sellAsset ? displayAmount(BigInt(sellAsset.amount), sellDecimals, 4) : '0'
+  const balance = popupWallet ? 'Unavailable' : sellAssetId === 'btc' ? displayAmount(BigInt(btcBalance), 8, 8) : sellAsset ? displayAmount(BigInt(sellAsset.amount), sellDecimals, 4) : '0'
   const walletActionLabel = !address ? 'Connect Inscrib3 Wallet' : walletOnWrongNetwork ? SWITCH_NETWORK_LABEL : null
   const baseTicker = pool?.baseAssetId === 'btc' ? 'BTC' : baseAsset?.metadata?.ticker ?? pool?.baseAssetInfo?.metadata?.ticker ?? 'BASE'
   const quoteTicker = pool?.quoteAssetId === 'btc' ? 'BTC' : quoteAsset?.metadata?.ticker ?? pool?.quoteAssetInfo?.metadata?.ticker ?? 'QUOTE'
   const swapBlocker = describeSwapBlocker()
   const liquidityBlocker = describeLiquidityBlocker()
-  const assetFormBlocker = firstFormError(assetValidation.errors, ASSET_FIELD_LABELS)
+  const assetFormBlocker = popupWallet ? 'Install extension to issue assets' : firstFormError(assetValidation.errors, ASSET_FIELD_LABELS)
   const currentPoolEligibility = poolEligibility?.pair === poolPairKey ? poolEligibility.result : null
-  const poolFormBlocker = !paymentsRestored ? 'Checking unfinished payments…'
+  const poolFormBlocker = popupWallet ? 'Install extension to create pools'
+    : !paymentsRestored ? 'Checking unfinished payments…'
     : poolOpeningPending ? 'Finish opening your funded pool first'
     : poolForm.baseAssetId && poolForm.quoteAssetId && !currentPoolEligibility ? 'Checking whether this pair is eligible…'
     : currentPoolEligibility && !currentPoolEligibility.eligible ? currentPoolEligibility.reason ?? 'This pair is reserved for the launch market'
@@ -1385,9 +1422,10 @@ function App() {
     if (!pool.swapEnabled) return 'Legacy pool · swaps disabled during migration'
     const typedAmount = quoteMode === 'input' ? sellAmountCheck : parseDisplayAmount(receiveAmount, buyDecimals)
     if ('error' in typedAmount) return typedAmount.error
-    if (raw && raw > walletBalance(sellAssetId)) return `Insufficient ${sellTicker} balance`
+    if (popupWallet && sellAssetId !== 'btc') return 'Install extension to send Arkade assets'
+    if (!popupWallet && raw && raw > walletBalance(sellAssetId)) return `Insufficient ${sellTicker} balance`
     if (!quote) return 'Finding best price…'
-    if (raw && swapFundingSats(raw, quote) > walletBalance('btc')) return sellAssetId === 'btc' ? 'Insufficient BTC balance (network fee included)' : 'Not enough BTC for the network fee'
+    if (!popupWallet && raw && swapFundingSats(raw, quote) > walletBalance('btc')) return sellAssetId === 'btc' ? 'Insufficient BTC balance (network fee included)' : 'Not enough BTC for the network fee'
     return null
   }
 
@@ -1397,6 +1435,7 @@ function App() {
   }
 
   function describeLiquidityBlocker(): string | null {
+    if (popupWallet) return 'Install extension to manage liquidity'
     if (!paymentsRestored) return 'Checking unfinished payments…'
     if (liquidityRequest && liquidityLocked) return liquidityRequest.status === 'failed' ? 'Dismiss the failed request to retry' : 'Request in progress…'
     if (!pool?.available) return 'Pool unavailable'
@@ -1450,6 +1489,10 @@ function App() {
           ? <a className="wallet-small" href={WALLET_INSTALL_URL} target="_blank" rel="noreferrer">Install wallet</a>
           : <button className="wallet-small" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Try again'}</button>}
       </div>}
+      {popupWallet && !walletIssue && <div className="wallet-banner popup-wallet-banner" role="status">
+        <div><b>Connected through Inscrib3 Wallet popup</b><span>BTC swaps and launch buys open a wallet approval popup. Balances, Arkade asset sends, liquidity, and creation require the browser extension.</span></div>
+        <a className="wallet-small" href={WALLET_INSTALL_URL} target="_blank" rel="noreferrer">Install extension</a>
+      </div>}
 
       <main>
         {page === 'swap' ? <>
@@ -1483,7 +1526,7 @@ function App() {
             {mode === 'swap' && <>
               {showSettings && <div className="settings"><span>Max slippage</span><div>{[10, 50, 100].map((v) => <button className={slippage === v ? 'selected' : ''} key={v} onClick={() => setSlippage(v)}>{v / 100}%</button>)}</div></div>}
               <div className="asset-box">
-              <div className="asset-top"><label>You pay</label><button className="balance" onClick={setMaxAmount} disabled={swapLocked}>Balance: {balance} <b>MAX</b></button></div>
+              <div className="asset-top"><label>You pay</label><button className="balance" onClick={setMaxAmount} disabled={swapLocked || popupWallet}>Balance: {balance} {!popupWallet && <b>MAX</b>}</button></div>
               <div className="asset-main">
                 <input value={amount} onChange={(event) => { setQuoteMode('input'); setAmount(event.target.value); setReceiveAmount(''); setQuote(null); setRequest(null); setError('') }} placeholder="0" inputMode="decimal" aria-label="Amount to sell" disabled={swapLocked} />
                 <button className="token-select" onClick={openPairModal}><TokenMark label={sellTicker} /><span>{sellTicker}</span><small>⌄</small></button>
@@ -1552,10 +1595,10 @@ function App() {
         </section>
         </> : page === 'launches' ? <LaunchesPage onOpen={(id) => navigate('launch', id)} onCreate={() => navigate('launch-create')} />
         : page === 'launch' ? <LaunchDetailPage key={launchId} id={launchId} onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
-          walletAddress={address} walletBalance={walletBalance} refreshWallet={refreshAssets} connectWallet={() => void requireWallet()}
-          fundContract={fundLaunchContract} referralCode={referralCode} />
+          walletAddress={address} walletBalance={walletBalance} walletBalancesAvailable={!popupWallet} popupWallet={popupWallet} refreshWallet={refreshAssets} connectWallet={() => void requireWallet()}
+          prepareFunding={popupWallet ? reservePwaWalletPopup : undefined} fundContract={fundLaunchContract} referralCode={referralCode} />
         : page === 'launch-create' ? <CreateLaunchPage onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
-          walletAddress={address} connectWallet={() => void requireWallet()} issueAsset={issueLaunchAsset} fundContract={fundLaunchContract}
+          walletAddress={address} popupWallet={popupWallet} connectWallet={() => void requireWallet()} issueAsset={issueLaunchAsset} fundContract={fundLaunchContract}
           onOpened={(id) => navigate('launch', id)} referralCode={referralCode} />
         : page === 'pools' ? <section className="view-page">
           <div className="view-heading"><div><span className="eyebrow"><i /> LIVE LIQUIDITY</span><h1>Pools</h1><p>Current covenant reserves and AMM identifiers.</p></div><button className="secondary" onClick={() => runWithToast(refreshPools)}>Refresh</button></div>
