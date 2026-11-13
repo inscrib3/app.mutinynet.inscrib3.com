@@ -323,7 +323,11 @@ function normalizedPrice(point: PricePoint, baseDecimals: number, quoteDecimals:
 function formatPrice(value: number): string {
   if (!Number.isFinite(value)) return '—'
   if (value === 0) return '0'
-  if (Math.abs(value) < 0.00000001) return value.toExponential(6)
+  if (Math.abs(value) < 0.00000001) {
+    const decimalPlaces = Math.min(18, Math.max(8, 6 - Math.floor(Math.log10(Math.abs(value)))))
+    const decimal = value.toFixed(decimalPlaces).replace(/0+$/, '').replace(/\.$/, '')
+    return decimal === '0' || decimal === '-0' ? value.toExponential(6) : decimal
+  }
   return value.toLocaleString(undefined, { maximumSignificantDigits: 10 })
 }
 
