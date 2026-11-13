@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
+import { parseDisplayAmount } from './form-validation'
 
 const API = import.meta.env.VITE_API_URL ?? '/api'
 
@@ -69,6 +70,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const compact = (value: string | bigint) => BigInt(value).toLocaleString()
 const short = (value: string, edge = 6) => value.length > edge * 2 ? `${value.slice(0, edge)}…${value.slice(-edge)}` : value
 const btc = (sats: string) => `${(Number(sats) / 100_000_000).toLocaleString(undefined, { maximumFractionDigits: 8 })} BTC`
+const LAUNCH_DUST_SATS = 330n
+
+function displayUnits(value: string | bigint, decimals: number, precision = 8): string {
+  const raw = BigInt(value)
+  if (decimals === 0) return raw.toLocaleString()
+  const scale = 10n ** BigInt(decimals); const whole = raw / scale
+  const fraction = (raw % scale).toString().padStart(decimals, '0').slice(0, precision).replace(/0+$/, '')
+  return fraction ? `${whole.toLocaleString()}.${fraction}` : whole.toLocaleString()
+}
+
+function editableUnits(value: bigint, decimals: number): string {
+  if (decimals === 0) return value.toString()
+  const scale = 10n ** BigInt(decimals); const whole = value / scale
+  const fraction = (value % scale).toString().padStart(decimals, '0').replace(/0+$/, '')
+  return fraction ? `${whole}.${fraction}` : whole.toString()
+}
 
 function LaunchMark({ launch }: { launch: Pick<Launch, 'ticker' | 'iconUrl'> }) {
   return launch.iconUrl
@@ -205,11 +222,12 @@ export function LaunchesPage({ onOpen, onCreate }: { onOpen: (id: string) => voi
   </section>
 }
 
-export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, connectWallet, fundContract, referralCode }: {
-  id: string; onBack: () => void; tradingEnabled: boolean; walletAddress: string; connectWallet: () => void; fundContract: FundContract; referralCode?: string
+export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, walletBalance, refreshWallet, connectWallet, fundContract, referralCode }: {
+  id: string; onBack: () => void; tradingEnabled: boolean; walletAddress: string; walletBalance: (assetId: string) => bigint; refreshWallet: () => Promise<void>;
+  connectWallet: () => void; fundContract: FundContract; referralCode?: string
 }) {
   const [launch, setLaunch] = useState<Launch | null>(null); const [trades, setTrades] = useState<LaunchTrade[]>([]); const [error, setError] = useState('')
-  const [side, setSide] = useState<'buy' | 'sell'>('buy'); const [amount, setAmount] = useState(''); const [quote, setQuote] = useState<LaunchQuoteResponse | null>(null); const [quoteBusy, setQuoteBusy] = useState(false)
+  const [side, setSide] = useState<'buy' | 'sell'>('buy'); const [amount, setAmount] = useState(''); const [quote, setQuote] = useState<LaunchQuoteResponse | null>(null); const [quoteBusy, setQuoteBusy] = useState(false); const [quoteError, setQuoteError] = useState('')
   const [tradeRequest, setTradeRequest] = useState<LaunchRequest | null>(null); const [tradeBusy, setTradeBusy] = useState(false)
   const [reloadCount, setReloadCount] = useState(0)
   useEffect(() => { const controller = new AbortController(); Promise.all([
@@ -217,29 +235,38 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, co
     request<{ items: LaunchTrade[] }>(`/v1/launches/${encodeURIComponent(id)}/activity?limit=10`, { signal: controller.signal }),
   ]).then(([next, activity]) => { setLaunch(next); setTrades(activity.items) }).catch((cause: unknown) => { if ((cause as Error).name !== 'AbortError') setError(cause instanceof Error ? cause.message : String(cause)) }); return () => controller.abort() }, [id, reloadCount])
   // A finished trade changes reserves and activity, so the page reloads them.
-  function applyTradeRequest(next: LaunchRequest) {
+  const applyTradeRequest = useCallback((next: LaunchRequest) => {
     setTradeRequest(next)
-    if (next.status === 'settled' || next.status === 'refunded') setReloadCount((count) => count + 1)
-  }
-  function clearTradeForm() { setAmount(''); setQuote(null) }
-  async function previewQuote() {
-    if (!amount || !/^\d+$/.test(amount) || BigInt(amount) <= 0n) { setError('Enter a positive integer raw amount.'); return }
-    setQuoteBusy(true); setError('')
-    try { setQuote(await request<LaunchQuoteResponse>(`/v1/launches/${encodeURIComponent(id)}/quote?side=${side}&amount=${amount}`)) }
-    catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); setQuote(null) } finally { setQuoteBusy(false) }
-  }
+    if (next.status === 'settled' || next.status === 'refunded') { setReloadCount((count) => count + 1); void refreshWallet() }
+  }, [refreshWallet])
+  function clearTradeForm() { setAmount(''); setQuote(null); setQuoteError(''); setQuoteBusy(false) }
+  useEffect(() => {
+    if (!launch || !['curve', 'pool'].includes(launch.phase) || amount.trim() === '') return
+    const parsed = parseDisplayAmount(amount, side === 'buy' ? 8 : launch.decimals)
+    if (!('raw' in parsed)) return
+    const controller = new AbortController(); let active = true
+    const timer = window.setTimeout(() => {
+      setQuoteBusy(true)
+      void request<LaunchQuoteResponse>(`/v1/launches/${encodeURIComponent(id)}/quote?side=${side}&amount=${parsed.raw}`, { signal: controller.signal })
+        .then((next) => { if (active) setQuote(next) })
+        .catch((cause: unknown) => { if (active && (cause as Error).name !== 'AbortError') setQuoteError(cause instanceof Error ? cause.message : String(cause)) })
+        .finally(() => { if (active) setQuoteBusy(false) })
+    }, 300)
+    return () => { active = false; window.clearTimeout(timer); controller.abort() }
+  }, [amount, id, launch, side])
   useEffect(() => {
     if (!tradeRequest || !['funded', 'settling'].includes(tradeRequest.status)) return
     const timer = window.setInterval(() => request<LaunchRequest>(`/v1/launch-requests/${tradeRequest.id}`).then(applyTradeRequest).catch(() => undefined), 3_000)
     return () => window.clearInterval(timer)
-  }, [tradeRequest])
+  }, [applyTradeRequest, tradeRequest])
   async function trade() {
     if (!walletAddress) { connectWallet(); return }
-    if (!launch?.assetId || !quote || !amount) { setError('Preview the current quote before funding.'); return }
+    const parsed = launch ? parseDisplayAmount(amount, side === 'buy' ? 8 : launch.decimals) : { error: 'Launch unavailable' }
+    if (!launch?.assetId || !quote || !('raw' in parsed)) { setError('Enter an amount and wait for the current quote before funding.'); return }
     setTradeBusy(true); setError(''); let fundingTxid: string | undefined
     try {
       const intent = await request<LaunchRequest>(`/v1/launches/${encodeURIComponent(id)}/trades`, { method: 'POST', body: JSON.stringify({
-        payAddress: walletAddress, side, inputAmount: amount, minOutput: quote.quote.outputAmount, ...(referralCode ? { referralCode } : {}),
+        payAddress: walletAddress, side, inputAmount: parsed.raw.toString(), minOutput: quote.quote.outputAmount, ...(referralCode ? { referralCode } : {}),
       }) });
       setTradeRequest(intent)
       fundingTxid = await fundContract(intent.contractAddress, side, BigInt(intent.inputAmount), BigInt(intent.fundingSats), launch.assetId)
@@ -259,16 +286,59 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, co
   if (!launch) return <section className="view-page"><div className="empty-state">Reading the launch…</div></section>
   const curveOpen = launch.phase === 'curve'
   const tradeInProgress = Boolean(tradeRequest && !['settled', 'refunded', 'failed'].includes(tradeRequest.status))
+  const inputDecimals = side === 'buy' ? 8 : launch.decimals
+  const outputDecimals = side === 'buy' ? launch.decimals : 8
+  const inputTicker = side === 'buy' ? 'BTC' : launch.ticker
+  const outputTicker = side === 'buy' ? launch.ticker : 'BTC'
+  const inputAssetId = side === 'buy' ? 'btc' : launch.assetId ?? ''
+  const amountCheck = parseDisplayAmount(amount, inputDecimals)
+  const inputRaw = 'raw' in amountCheck ? amountCheck.raw : null
+  const inputBalance = walletAddress && inputAssetId ? walletBalance(inputAssetId) : 0n
+  const btcWalletBalance = walletAddress ? walletBalance('btc') : 0n
+  const balanceBlocker = !walletAddress || !inputRaw ? null
+    : side === 'buy' && inputRaw + LAUNCH_DUST_SATS > btcWalletBalance ? 'Insufficient BTC balance (330 sat carrier included)'
+      : side === 'sell' && inputRaw > inputBalance ? `Insufficient ${launch.ticker} balance`
+        : side === 'sell' && btcWalletBalance < LAUNCH_DUST_SATS ? 'At least 330 sats are required for the trade carrier' : null
+  const setMax = () => {
+    setQuote(null); setQuoteError(''); setQuoteBusy(false)
+    setAmount(editableUnits(side === 'buy' ? (btcWalletBalance > LAUNCH_DUST_SATS ? btcWalletBalance - LAUNCH_DUST_SATS : 0n) : inputBalance, inputDecimals))
+  }
   // Connecting needs no quote; funding a trade does.
-  const tradeButtonDisabled = tradeBusy || (Boolean(walletAddress) && (!quote || tradeInProgress))
+  const tradeButtonDisabled = tradeBusy || (Boolean(walletAddress) && (!quote || tradeInProgress || Boolean(balanceBlocker)))
+  const tradeButtonLabel = tradeBusy ? 'Waiting for wallet…' : !walletAddress ? 'Connect wallet' : balanceBlocker ?? (quoteBusy ? 'Finding best price…' : !quote ? 'Enter an amount' : 'Review & fund trade')
   return <section className="view-page launch-detail-page">
     <div className="launch-detail-hero"><button className="back-link" onClick={onBack}>← All launches</button><div className="launch-detail-title"><LaunchMark launch={launch} /><div><span className="eyebrow"><i /> {launch.protocolGeneration ?? 'CURVE-V1'}</span><h1>{launch.name}</h1><p>${launch.ticker} · created by <code>{short(launch.creatorAddress, 8)}</code></p></div></div><div className="launch-card-badges">{launch.onFire && <span className="fire-badge" title={`${launch.trades24h} settled trades in the last 24 hours`}>🔥 On fire</span>}<PhasePill phase={launch.phase} /></div></div>
-    <div className="metric-grid"><div><span>Graduation</span><b>{(launch.progressBps / 100).toFixed(2)}%</b><small>{btc(launch.realBtcReserve)} of {btc(launch.economics.graduationThreshold)}</small></div><div><span>Available on curve</span><b>{compact(launch.sellableTokens)}</b><small>${launch.ticker} raw units</small></div><div><span>Activity · 24h</span><b>{btc(launch.volumeBtc24h)}</b><small>{launch.trades24h.toLocaleString()} settled trades</small></div><div><span>Total fee</span><b>{((launch.economics.creatorFeeBps + launch.economics.protocolFeeBps) / 100).toFixed(2)}%</b><small>{launch.economics.creatorFeeBps / 100}% creator · {launch.economics.protocolFeeBps / 100}% protocol</small></div></div>
+    <div className="metric-grid"><div><span>Graduation</span><b>{(launch.progressBps / 100).toFixed(2)}%</b><small>{btc(launch.realBtcReserve)} of {btc(launch.economics.graduationThreshold)}</small></div><div><span>Available on curve</span><b>{displayUnits(launch.sellableTokens, launch.decimals)}</b><small>{launch.ticker} · {launch.decimals} decimals</small></div><div><span>Activity · 24h</span><b>{btc(launch.volumeBtc24h)}</b><small>{launch.trades24h.toLocaleString()} settled trades</small></div><div><span>Total fee</span><b>{((launch.economics.creatorFeeBps + launch.economics.protocolFeeBps) / 100).toFixed(2)}%</b><small>{launch.economics.creatorFeeBps / 100}% creator · {launch.economics.protocolFeeBps / 100}% protocol</small></div></div>
     <LaunchPriceChart launch={launch} />
-    <div className="launch-detail-grid"><article className="token-detail-card"><div className="token-detail-head"><LaunchMark launch={launch} /><div><h2>Launch terms</h2><span>Immutable economics snapshot</span></div></div><dl><div><dt>Total supply</dt><dd>{compact(launch.economics.supply)}</dd></div><div><dt>Reserved for pool</dt><dd>{compact(launch.economics.reservedTokens)}</dd></div><div><dt>Virtual BTC</dt><dd>{btc(launch.economics.virtualBtc)}</dd></div><div><dt>Asset ID</dt><dd><code>{launch.assetId ? short(launch.assetId, 10) : 'Preparing'}</code></dd></div><div><dt>Protocol</dt><dd><code>{launch.protocolGeneration}</code></dd></div></dl></article>
-      <article className="launch-trade-card"><span className="panel-label">{curveOpen ? 'CURVE QUOTE' : launch.phase === 'pool' ? 'POOL QUOTE' : 'LAUNCH STATUS'}</span><h2>{curveOpen ? `Preview ${launch.ticker}` : launch.phase === 'pool' ? 'Graduated pool preview' : 'Trading is not open'}</h2><p>Exact integer quote from the indexed reserves. A funding contract is created only after wallet review.</p>{(curveOpen || launch.phase === 'pool') && <><div className="launch-side-tabs"><button className={side === 'buy' ? 'active' : ''} onClick={() => { setSide('buy'); setQuote(null) }}>Buy</button><button className={side === 'sell' ? 'active' : ''} onClick={() => { setSide('sell'); setQuote(null) }}>Sell</button></div><label className="launch-quote-input"><span>{side === 'buy' ? 'Satoshis in' : `${launch.ticker} raw units in`}</span><input value={amount} onChange={(event) => { setAmount(event.target.value); setQuote(null) }} inputMode="numeric" placeholder="0" /></label><button className="secondary full" onClick={() => void previewQuote()} disabled={quoteBusy || tradeBusy}>{quoteBusy ? 'Calculating…' : 'Preview quote'}</button>{quote && <div className="launch-quote-result"><div><span>Output</span><b>{compact(quote.quote.outputAmount)} {side === 'buy' ? launch.ticker : 'sats'}</b></div><div><span>Total fees</span><b>{compact(BigInt(quote.quote.creatorFee) + BigInt(quote.quote.protocolFee))} sats</b></div>{BigInt(quote.quote.refundAmount) > 0n && <div><span>Final-fill refund</span><b>{compact(quote.quote.refundAmount)} sats</b></div>}{quote.quote.graduates && <strong>This buy reaches graduation.</strong>}</div>}</>}{tradingEnabled ? <button className="primary" onClick={() => void trade()} disabled={tradeButtonDisabled}>{tradeBusy ? 'Waiting for wallet…' : !walletAddress ? 'Connect wallet' : 'Review & fund trade'}</button> : <button className="primary launch-disabled" disabled>Wallet trading disabled until funded validation</button>}{tradeRequest && <div className="launch-request-status"><b>{tradeRequest.status.replace('-', ' ')}</b><span>{tradeRequest.settlementTxid ? short(tradeRequest.settlementTxid, 8) : tradeRequest.fundingTxid ? short(tradeRequest.fundingTxid, 8) : 'Waiting for wallet funding'}</span>{tradeRequest.status === 'funded' && <button className="secondary full" onClick={() => void refundTrade()} disabled={tradeBusy}>Refund funding</button>}</div>}<small>Never fund an address shown outside a wallet transaction preview.</small></article></div>
+    <div className="launch-detail-grid"><article className="token-detail-card"><div className="token-detail-head"><LaunchMark launch={launch} /><div><h2>Launch terms</h2><span>Immutable economics snapshot</span></div></div><dl><div><dt>Total supply</dt><dd>{displayUnits(launch.economics.supply, launch.decimals)} {launch.ticker}</dd></div><div><dt>Reserved for pool</dt><dd>{displayUnits(launch.economics.reservedTokens, launch.decimals)} {launch.ticker}</dd></div><div><dt>Virtual BTC</dt><dd>{btc(launch.economics.virtualBtc)}</dd></div><div><dt>Asset ID</dt><dd><code>{launch.assetId ? short(launch.assetId, 10) : 'Preparing'}</code></dd></div><div><dt>Protocol</dt><dd><code>{launch.protocolGeneration}</code></dd></div></dl></article>
+      <article className="launch-trade-card">
+        <span className="panel-label">{curveOpen ? 'CURVE TRADE' : launch.phase === 'pool' ? 'PERMANENT POOL TRADE' : 'LAUNCH STATUS'}</span>
+        <h2>{curveOpen || launch.phase === 'pool' ? `Trade ${launch.ticker}` : 'Trading is not open'}</h2>
+        <p>Enter display units. The app converts them into exact integer amounts before creating a wallet-reviewed funding contract.</p>
+        {(curveOpen || launch.phase === 'pool') && <>
+          <div className="launch-side-tabs"><button className={side === 'buy' ? 'active' : ''} onClick={() => { setSide('buy'); clearTradeForm() }}>Buy</button><button className={side === 'sell' ? 'active' : ''} onClick={() => { setSide('sell'); clearTradeForm() }}>Sell</button></div>
+          <div className="launch-swap-box">
+            <div className="launch-swap-top"><span>You pay</span><button type="button" onClick={setMax} disabled={!walletAddress || tradeInProgress}>Balance: {walletAddress ? displayUnits(inputBalance, inputDecimals) : '—'} <b>MAX</b></button></div>
+            <div className="launch-swap-main"><input value={amount} onChange={(event) => { setAmount(event.target.value); setQuote(null); setQuoteError(''); setQuoteBusy(false); setError('') }} inputMode="decimal" placeholder="0" disabled={tradeInProgress} aria-label={`Amount of ${inputTicker} to pay`} /><span className="launch-token"><i>{inputTicker.slice(0, 1)}</i>{inputTicker}</span></div>
+            <small>{side === 'buy' ? 'BTC display units · 8 decimals' : `${launch.name} · ${launch.decimals} decimals`}</small>
+          </div>
+          <div className="launch-swap-arrow">↓</div>
+          <div className="launch-swap-box output">
+            <div className="launch-swap-top"><span>You receive</span><em>{quoteBusy ? 'Finding price…' : quote ? 'Exact quote' : 'Enter an amount'}</em></div>
+            <div className="launch-swap-main"><b>{quote ? displayUnits(quote.quote.outputAmount, outputDecimals, outputDecimals) : '0'}</b><span className="launch-token"><i>{outputTicker.slice(0, 1)}</i>{outputTicker}</span></div>
+            <small>{side === 'buy' ? `${launch.name} · ${launch.decimals} decimals` : 'Native Bitcoin'}</small>
+          </div>
+          {amount && 'error' in amountCheck && <div className="launch-field-error">{amountCheck.error}</div>}
+          {balanceBlocker && <div className="launch-field-error">{balanceBlocker}</div>}
+          {quoteError && <div className="launch-field-error">{quoteError}</div>}
+          {quote && <div className="launch-quote-result"><div><span>Input sent to contract</span><b>{compact(inputRaw ?? 0n)} raw units</b></div><div><span>Total fees</span><b>{compact(BigInt(quote.quote.creatorFee) + BigInt(quote.quote.protocolFee))} sats</b></div>{BigInt(quote.quote.refundAmount) > 0n && <div><span>Final-fill refund</span><b>{displayUnits(quote.quote.refundAmount, 8)} BTC</b></div>}{quote.quote.graduates && <strong>This buy reaches graduation.</strong>}</div>}
+        </>}
+        {tradingEnabled ? <button className="primary" onClick={() => void trade()} disabled={tradeButtonDisabled}>{tradeButtonLabel}</button> : <button className="primary launch-disabled" disabled>Wallet trading disabled until funded validation</button>}
+        {tradeRequest && <div className="launch-request-status"><b>{tradeRequest.status.replace('-', ' ')}</b><span>{tradeRequest.settlementTxid ? short(tradeRequest.settlementTxid, 7) : tradeRequest.fundingTxid ? short(tradeRequest.fundingTxid, 7) : short(tradeRequest.contractAddress, 7)}</span>{['funded', 'failed'].includes(tradeRequest.status) && <button className="secondary" onClick={() => void refundTrade()} disabled={tradeBusy}>Request refund</button>}</div>}
+        <small>Never fund an address shown outside a wallet transaction preview.</small>
+      </article></div>
     {error && <div className="notice error"><b>Quote unavailable</b><span>{error}</span></div>}<div className="notice asset-risk"><b>Experimental launch</b><span>Names and tickers are not unique. Verify the asset ID, fee policy, holder concentration and wallet transaction before signing.</span></div>
-    <div className="activity-section-heading"><div><span className="eyebrow"><i /> INDEXED SETTLEMENTS</span><h2>Launch activity</h2><p>Verified curve and graduated-pool trades.</p></div></div><div className="activity-panel"><div className="activity-head"><span>Side</span><span>Input → output</span><span>Venue</span><span>Transaction</span></div>{trades.length === 0 ? <div className="empty-state">No indexed trades yet.</div> : trades.map((trade) => <div className="activity-row" key={trade.id}><div><span className="activity-icon">↔</span><div><b>{trade.side === 'buy' ? 'Buy' : 'Sell'} {launch.ticker}</b><small>{new Date(trade.createdAt).toLocaleString()}</small></div></div><code>{compact(trade.inputAmount)} → {compact(trade.outputAmount)}</code><span className="status-pill settled">{trade.venue}</span><code title={trade.txid}>{short(trade.txid, 7)}</code></div>)}</div>
+    <div className="activity-section-heading"><div><span className="eyebrow"><i /> INDEXED SETTLEMENTS</span><h2>Launch activity</h2><p>Verified curve and graduated-pool trades.</p></div></div><div className="activity-panel"><div className="activity-head"><span>Side</span><span>Input → output</span><span>Venue</span><span>Transaction</span></div>{trades.length === 0 ? <div className="empty-state">No indexed trades yet.</div> : trades.map((trade) => <div className="activity-row" key={trade.id}><div><span className="activity-icon">↔</span><div><b>{trade.side === 'buy' ? 'Buy' : 'Sell'} {launch.ticker}</b><small>{new Date(trade.createdAt).toLocaleString()}</small></div></div><code>{trade.side === 'buy' ? `${displayUnits(trade.inputAmount, 8)} BTC → ${displayUnits(trade.outputAmount, launch.decimals)} ${launch.ticker}` : `${displayUnits(trade.inputAmount, launch.decimals)} ${launch.ticker} → ${displayUnits(trade.outputAmount, 8)} BTC`}</code><span className="status-pill settled">{trade.venue}</span><code title={trade.txid}>{short(trade.txid, 7)}</code></div>)}</div>
   </section>
 }
 

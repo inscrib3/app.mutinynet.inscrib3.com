@@ -1552,7 +1552,8 @@ function App() {
         </section>
         </> : page === 'launches' ? <LaunchesPage onOpen={(id) => navigate('launch', id)} onCreate={() => navigate('launch-create')} />
         : page === 'launch' ? <LaunchDetailPage key={launchId} id={launchId} onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
-          walletAddress={address} connectWallet={() => void requireWallet()} fundContract={fundLaunchContract} referralCode={referralCode} />
+          walletAddress={address} walletBalance={walletBalance} refreshWallet={refreshAssets} connectWallet={() => void requireWallet()}
+          fundContract={fundLaunchContract} referralCode={referralCode} />
         : page === 'launch-create' ? <CreateLaunchPage onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
           walletAddress={address} connectWallet={() => void requireWallet()} issueAsset={issueLaunchAsset} fundContract={fundLaunchContract}
           onOpened={(id) => navigate('launch', id)} referralCode={referralCode} />
