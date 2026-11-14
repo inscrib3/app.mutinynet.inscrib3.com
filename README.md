@@ -55,16 +55,14 @@ The app uses the immutable `window.arkade` provider injected by the
 Private keys remain inside the wallet. Sensitive operations open a wallet approval screen before
 anything is signed.
 
-When the extension provider is unavailable, the app falls back to the hosted wallet popup protocol.
-The popup supports connecting an address and explicitly approving BTC sends, so users can access
-points and activity, request faucet funds, make BTC-funded swaps, and buy launch assets from the
-installed App PWA. The app verifies both the popup origin and the exact popup window before accepting
-a response.
+When the extension provider is unavailable, the app opens the hosted wallet as a persistent provider
+window. It exposes the account, network, balance, asset, history, signing, settlement, and asset
+lifecycle operations needed by the installed App PWA. Every financial or signing operation still
+requires explicit approval in that wallet window. The app verifies both the wallet origin and the
+exact connected window before accepting responses or events.
 
-The popup does not expose balances or Arkade asset sends. Selling assets, managing liquidity, issuing
-assets, creating pools, and opening a launch therefore still require the browser extension's full
-`window.arkade` provider. Extension and web-wallet storage are separate and may contain different
-wallets.
+Keep the provider window open while using the installed App. Closing it disconnects the PWA. Extension
+and web-wallet storage remain separate and may contain different wallets.
 
 See the [PWA popup integration guide](https://docs.inscrib3.com/pwa/popup) for the message protocol and required origin checks.
 

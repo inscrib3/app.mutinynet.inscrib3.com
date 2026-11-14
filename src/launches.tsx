@@ -301,8 +301,7 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, wa
   const inputBalance = walletAddress && inputAssetId ? walletBalance(inputAssetId) : 0n
   const btcWalletBalance = walletAddress ? walletBalance('btc') : 0n
   const balanceBlocker = !walletAddress || !inputRaw ? null
-    : popupWallet && side === 'sell' ? 'Install the browser extension to send launch assets'
-      : !walletBalancesAvailable ? null
+    : !walletBalancesAvailable ? null
     : side === 'buy' && inputRaw + LAUNCH_DUST_SATS > btcWalletBalance ? 'Insufficient BTC balance (330 sat carrier included)'
       : side === 'sell' && inputRaw > inputBalance ? `Insufficient ${launch.ticker} balance`
         : side === 'sell' && btcWalletBalance < LAUNCH_DUST_SATS ? 'At least 330 sats are required for the trade carrier' : null
@@ -338,7 +337,7 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, wa
           {amount && 'error' in amountCheck && <div className="launch-field-error">{amountCheck.error}</div>}
           {balanceBlocker && <div className="launch-field-error">{balanceBlocker}</div>}
           {quoteError && <div className="launch-field-error">{quoteError}</div>}
-          {popupWallet && side === 'buy' && <div className="launch-popup-note">Funding opens Inscrib3 Wallet for explicit approval. The popup cannot expose your balance to this app.</div>}
+          {popupWallet && <div className="launch-popup-note">The connected Inscrib3 Wallet window shows every funding request for explicit approval.</div>}
           {quote && <div className="launch-quote-result"><div><span>Input sent to contract</span><b>{compact(inputRaw ?? 0n)} raw units</b></div><div><span>Total fees</span><b>{compact(BigInt(quote.quote.creatorFee) + BigInt(quote.quote.protocolFee))} sats</b></div>{BigInt(quote.quote.refundAmount) > 0n && <div><span>Final-fill refund</span><b>{displayUnits(quote.quote.refundAmount, 8)} BTC</b></div>}{quote.quote.graduates && <strong>This buy reaches graduation.</strong>}</div>}
         </>}
         {tradingEnabled ? <button className="primary" onClick={() => void trade()} disabled={tradeButtonDisabled}>{tradeButtonLabel}</button> : <button className="primary launch-disabled" disabled>Wallet trading disabled until funded validation</button>}
@@ -354,7 +353,7 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, wa
 const SIMULATED_FIELDS: Array<keyof typeof DEFAULT_FORM> = ['supply', 'virtualBtc', 'graduationThreshold', 'creatorFeeBps', 'protocolFeeBps', 'buyAmount']
 const DEFAULT_FORM = { id: '', name: '', ticker: '', description: '', supply: '1000000000', decimals: '0', virtualBtc: '1000000', graduationThreshold: '9000000', creatorFeeBps: '70', protocolFeeBps: '30', buyAmount: '100000' }
 
-export function CreateLaunchPage({ onBack, tradingEnabled, walletAddress, popupWallet, connectWallet, issueAsset, fundContract, onOpened, referralCode }: {
+export function CreateLaunchPage({ onBack, tradingEnabled, walletAddress, connectWallet, issueAsset, fundContract, onOpened, referralCode }: {
   onBack: () => void; tradingEnabled: boolean; walletAddress: string; popupWallet: boolean; connectWallet: () => void;
   issueAsset: (input: { amount: bigint; metadata: { name?: string; ticker: string; decimals: number } }) => Promise<{ assetId: string }>;
   fundContract: FundContract; onOpened: (id: string) => void; referralCode?: string
@@ -373,7 +372,6 @@ export function CreateLaunchPage({ onBack, tradingEnabled, walletAddress, popupW
   }
   async function createLaunch() {
     if (!walletAddress) { connectWallet(); return }
-    if (popupWallet) { setError('Creating a launch requires the Inscrib3 Wallet browser extension. The popup can connect and fund BTC buys, but cannot issue assets.'); return }
     if (!/^[a-z0-9][a-z0-9-]{1,63}$/.test(form.id)) { setError('Launch ID must be 2–64 lowercase letters, numbers or hyphens.'); return }
     if (!form.name.trim() || !/^[A-Za-z0-9]{1,16}$/.test(form.ticker)) { setError('Enter a name and a 1–16 character alphanumeric ticker.'); return }
     if (!/^[1-9]\d*$/.test(form.supply)) { setError('Supply must be a positive integer.'); return }
@@ -409,7 +407,7 @@ export function CreateLaunchPage({ onBack, tradingEnabled, walletAddress, popupW
       <div className="form-grid"><label><span>Launch ID</span><input value={form.id} onChange={field('id')} placeholder="my-bitcoin-asset" /></label><label><span>Name</span><input value={form.name} onChange={field('name')} placeholder="My Bitcoin Asset" /></label><label><span>Ticker</span><input value={form.ticker} onChange={field('ticker')} placeholder="TOKEN" maxLength={16} /></label><label><span>Decimals</span><input value={form.decimals} onChange={field('decimals')} inputMode="numeric" /></label><label className="wide"><span>Description</span><textarea value={form.description} onChange={field('description')} placeholder="What is this launch?" /></label><label><span>Fixed supply</span><input value={form.supply} onChange={field('supply')} inputMode="numeric" /></label><label><span>Initial buy · sats</span><input value={form.buyAmount} onChange={field('buyAmount')} inputMode="numeric" /></label><label><span>Virtual BTC · sats</span><input value={form.virtualBtc} onChange={field('virtualBtc')} inputMode="numeric" /></label><label><span>Graduation threshold · sats</span><input value={form.graduationThreshold} onChange={field('graduationThreshold')} inputMode="numeric" /></label><label><span>Creator fee · bps</span><input value={form.creatorFeeBps} onChange={field('creatorFeeBps')} inputMode="numeric" /></label><label><span>Protocol fee · bps</span><input value={form.protocolFeeBps} onChange={field('protocolFeeBps')} inputMode="numeric" /></label></div>
       <button className="primary" onClick={() => void simulate()} disabled={busy || simulating}>{simulating ? 'Calculating…' : 'Simulate exact curve'}</button>{error && <div className="notice error"><b>{progress ? 'Launch action failed' : 'Invalid economics'}</b><span>{error}</span></div>}
       {simulation && <div className="launch-simulation"><div><span>Sellable on curve</span><b>{compact(simulation.sellableTokens)}</b></div><div><span>Reserved for pool</span><b>{compact(simulation.reservedTokens)}</b></div><div><span>Initial buy output</span><b>{simulation.quote ? compact(simulation.quote.outputAmount) : '—'}</b></div><div><span>Initial buy fees</span><b>{simulation.quote ? `${compact(BigInt(simulation.quote.creatorFee) + BigInt(simulation.quote.protocolFee))} sats` : '—'}</b></div></div>}
-      {progress && <div className="creation-progress">{progress}</div>}{tradingEnabled ? <button className="primary" onClick={() => void createLaunch()} disabled={busy || simulating || (Boolean(walletAddress) && popupWallet)}>{busy ? 'Waiting for wallet…' : !walletAddress ? 'Connect wallet' : popupWallet ? 'Install extension to create launch' : 'Issue assets & open launch'}</button> : <button className="primary launch-disabled" disabled>Wallet launch disabled until funded validation</button>}
+      {progress && <div className="creation-progress">{progress}</div>}{tradingEnabled ? <button className="primary" onClick={() => void createLaunch()} disabled={busy || simulating}>{busy ? 'Waiting for wallet…' : !walletAddress ? 'Connect wallet' : 'Issue assets & open launch'}</button> : <button className="primary launch-disabled" disabled>Wallet launch disabled until funded validation</button>}
     </article><aside className="create-info"><span className="panel-label">RELEASE GATE</span><h3>No unvalidated funding addresses</h3><p>The simulator uses the same integer arithmetic intended for the covenant. Asset issuance and funding remain unavailable until the complete path passes emulator and funded Mutinynet tests.</p><ul><li>Buy and sell symmetry</li><li>Final partial fill and refund</li><li>Permissionless graduation</li><li>Permanent liquidity lock</li><li>Timed recovery without stranded funds</li></ul></aside></div>
   </section>
 }
