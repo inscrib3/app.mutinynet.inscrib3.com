@@ -64,6 +64,11 @@ exact connected window before accepting responses or events.
 Keep the provider window open while using the installed App. Closing it disconnects the PWA. Extension
 and web-wallet storage remain separate and may contain different wallets.
 
+On an iPhone or iPad launched from the Home Screen, iOS does not reliably preserve `window.opener`
+across PWA origins. In that environment only, the App presents the same wallet provider in a
+cross-origin modal and uses the Storage Access API to reach the wallet's existing first-party storage.
+Normal browser and extension flows are unchanged.
+
 See the [PWA popup integration guide](https://docs.inscrib3.com/pwa/popup) for the message protocol and required origin checks.
 
 For swaps and liquidity updates, the wallet funds a request-specific covenant that commits to the
