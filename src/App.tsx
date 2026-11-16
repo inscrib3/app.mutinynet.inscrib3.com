@@ -198,6 +198,9 @@ interface ArkadeProvider {
   connect(): Promise<string[]>
   isConnected?(): Promise<boolean>
   getAddress(): Promise<string>
+  getXOnlyPublicKey(): Promise<string>
+  getPointsPublicKey(): Promise<string>
+  signMessage(message: string): Promise<{ message: string; signature: string; address: string }>
   getNetwork(): Promise<NetworkInfo>
   getBalance(): Promise<BalanceInfo>
   getAssets(): Promise<AssetInfo[]>
@@ -519,6 +522,7 @@ function App() {
   const [poolId, setPoolId] = useState(initialRoute.poolId ?? '')
   const [launchId, setLaunchId] = useState(initialRoute.launchId ?? '')
   const [address, setAddress] = useState('')
+  const [identityKey, setIdentityKey] = useState('')
   const [walletMode, setWalletMode] = useState<WalletMode | null>(null)
   const [assets, setAssets] = useState<AssetInfo[]>([])
   const [btcBalance, setBtcBalance] = useState(0)
@@ -846,11 +850,24 @@ function App() {
   const loadWallet = useCallback(async (provider: ArkadeProvider, knownAddress?: string) => {
     const network = await provider.getNetwork()
     const nextAddress = knownAddress ?? await provider.getAddress()
-    setWalletMode(provider.isPwa ? 'pwa' : 'extension'); setWalletNetwork(network); setAddress(nextAddress); setWalletIssue(null); setShowSwitchSteps(false)
+    const [nextWalletKey, nextIdentityKey] = await Promise.all([provider.getXOnlyPublicKey(), provider.getPointsPublicKey()])
+    if (!/^[0-9a-f]{64}$/i.test(nextWalletKey) || !/^[0-9a-f]{64}$/i.test(nextIdentityKey)) throw new Error('Wallet returned an invalid identity public key')
+    setWalletMode(provider.isPwa ? 'pwa' : 'extension'); setWalletNetwork(network); setAddress(nextAddress); setIdentityKey(nextIdentityKey.toLowerCase()); setWalletIssue(null); setShowSwitchSteps(false)
     if (network.network !== WALLET_NETWORK) { setAssets([]); setBtcBalance(0); return }
-    const [nextAssets, nextBalance] = await Promise.all([provider.getAssets(), provider.getBalance()])
+    const identityPath = `/v1/points/identity?address=${encodeURIComponent(nextAddress)}&walletKey=${encodeURIComponent(nextWalletKey)}&identityKey=${encodeURIComponent(nextIdentityKey)}`
+    const registration = await api<{ registered: boolean; message: string }>(identityPath)
+    if (!registration.registered) {
+      const proof = await provider.signMessage(registration.message)
+      await api('/v1/points/identity', { method: 'POST', body: JSON.stringify({ address: nextAddress, walletKey: nextWalletKey,
+        identityKey: nextIdentityKey, message: proof.message, signature: proof.signature, signingAddress: proof.address }) })
+    }
+    const [nextAssets, nextBalance, summary, leaders] = await Promise.all([
+      provider.getAssets(), provider.getBalance(),
+      api<PointsSummary>(`/v1/points?address=${encodeURIComponent(nextAddress)}&identityKey=${encodeURIComponent(nextIdentityKey)}`),
+      api<{ items: LeaderboardEntry[] }>('/v1/points/leaderboard?limit=5'),
+    ])
     assertProviderAmounts(nextAssets, nextBalance)
-    setAssets(nextAssets); setBtcBalance(nextBalance.available)
+    setAssets(nextAssets); setBtcBalance(nextBalance.available); setPoints(summary); setLeaderboard(leaders.items)
   }, [])
 
   // A locked wallet gets a banner that waits for the unlock; other failures are one-off toasts.
@@ -879,13 +896,13 @@ function App() {
   }, [address, setActivity, setActivityCursor])
 
   const refreshPoints = useCallback(async () => {
-    if (!address) return
+    if (!address || !identityKey) return
     const [summary, leaders] = await Promise.all([
-      api<PointsSummary>(`/v1/points?address=${encodeURIComponent(address)}`),
+      api<PointsSummary>(`/v1/points?address=${encodeURIComponent(address)}&identityKey=${encodeURIComponent(identityKey)}`),
       api<{ items: LeaderboardEntry[] }>('/v1/points/leaderboard?limit=5'),
     ])
     setPoints(summary); setLeaderboard(leaders.items)
-  }, [address])
+  }, [address, identityKey])
 
   const loadMoreLeaderboard = useCallback(async () => {
     if (globalLeaderboardOffset === undefined || globalLeaderboardLoading) return
@@ -1027,7 +1044,7 @@ function App() {
     const sync = () => void loadWallet(provider).catch(showWalletError)
     const syncAccounts = (data?: unknown) => {
       if (Array.isArray(data) && data.length === 0) {
-        setAddress(''); setAssets([]); setBtcBalance(0); setWalletMode(null); setWalletNetwork(null)
+        setAddress(''); setIdentityKey(''); setAssets([]); setBtcBalance(0); setWalletMode(null); setWalletNetwork(null)
         if (provider.isPwa) window.arkade = undefined
         return
       }
@@ -1083,7 +1100,7 @@ function App() {
     const initial = window.setTimeout(() => void refreshPoints().catch(() => undefined), 0)
     const refresh = window.setInterval(() => void refreshPoints().catch(() => undefined), 15_000)
     return () => { window.clearTimeout(initial); window.clearInterval(refresh) }
-  }, [address, refreshPoints])
+  }, [address, identityKey, refreshPoints])
 
   const quoteRequestAmount = quoteMode === 'input' ? raw : receiveRaw
   useEffect(() => {
@@ -1294,7 +1311,7 @@ function App() {
         id: poolForm.id, name: poolForm.name, baseAssetId: poolForm.baseAssetId, quoteAssetId: poolForm.quoteAssetId,
         lpAssetId: lp.assetId, lpLedgerAssetId: ledger.assetId, controlAssetId: control.assetId,
         feeBps, protocolFeeBps, payAddress: address, baseAmount: baseAmount.toString(), quoteAmount: quoteAmount.toString(),
-        ...(referralCode ? { referralCode } : {}),
+        identityKey, ...(referralCode ? { referralCode } : {}),
       }) })
       setPoolCreation(creation)
       setCreationStep('4/5 · Fund liquidity, carriers, and creation fee atomically')
@@ -1354,7 +1371,7 @@ function App() {
         : (BigInt(quote.outputAmount) * BigInt(10_000 - slippage)) / 10_000n
       const intent = await api<SwapRequest>(`/v1/pools/${pool.id}/swaps`, {
         method: 'POST', body: JSON.stringify({ payAddress: address, sellAssetId, sellAmount: raw.toString(), minOutput: minOutput.toString(),
-          ...(referralCode ? { referralCode } : {}) }),
+          identityKey, ...(referralCode ? { referralCode } : {}) }),
       })
       setRequest(intent)
       const fundingSats = walletNumber(BigInt(intent.fundingSats), 'swap BTC funding')
@@ -1607,10 +1624,10 @@ function App() {
         </> : page === 'launches' ? <LaunchesPage onOpen={(id) => navigate('launch', id)} onCreate={() => navigate('launch-create')} />
         : page === 'launch' ? <LaunchDetailPage key={launchId} id={launchId} onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
           walletAddress={address} walletBalance={walletBalance} walletBalancesAvailable={true} popupWallet={popupWallet} refreshWallet={refreshAssets} connectWallet={() => void requireWallet()}
-          fundContract={fundLaunchContract} referralCode={referralCode} />
+          fundContract={fundLaunchContract} identityKey={identityKey} referralCode={referralCode} />
         : page === 'launch-create' ? <CreateLaunchPage onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
           walletAddress={address} popupWallet={popupWallet} connectWallet={() => void requireWallet()} issueAsset={issueLaunchAsset} fundContract={fundLaunchContract}
-          onOpened={(id) => navigate('launch', id)} referralCode={referralCode} />
+          onOpened={(id) => navigate('launch', id)} identityKey={identityKey} referralCode={referralCode} />
         : page === 'pools' ? <section className="view-page">
           <div className="view-heading"><div><span className="eyebrow"><i /> LIVE LIQUIDITY</span><h1>Pools</h1><p>Current covenant reserves and AMM identifiers.</p></div><button className="secondary" onClick={() => runWithToast(refreshPools)}>Refresh</button></div>
           <div className="pool-search-row">

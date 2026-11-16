@@ -18,6 +18,7 @@ export interface PwaArkadeProvider {
   getAddress(): Promise<string>
   getBoardingAddress(): Promise<string>
   getXOnlyPublicKey(): Promise<string>
+  getPointsPublicKey(): Promise<string>
   getBalance(): Promise<unknown>
   getNetwork(): Promise<unknown>
   getAssets(): Promise<unknown[]>
@@ -183,6 +184,7 @@ export async function connectWithPwaWallet(network: 'bitcoin' | 'mutinynet'): Pr
       getAddress: () => request<string>('arkade_getAddress'),
       getBoardingAddress: () => request<string>('arkade_getBoardingAddress'),
       getXOnlyPublicKey: () => request<string>('arkade_getXOnlyPublicKey'),
+      getPointsPublicKey: () => request<string>('arkade_getPointsPublicKey'),
       getBalance: () => request('arkade_getBalance'),
       getNetwork: () => request('arkade_getNetwork'),
       getAssets: () => request<unknown[]>('arkade_getAssets'),

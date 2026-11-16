@@ -222,9 +222,9 @@ export function LaunchesPage({ onOpen, onCreate }: { onOpen: (id: string) => voi
   </section>
 }
 
-export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, walletBalance, walletBalancesAvailable, popupWallet, refreshWallet, connectWallet, prepareFunding, fundContract, referralCode }: {
+export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, walletBalance, walletBalancesAvailable, popupWallet, refreshWallet, connectWallet, prepareFunding, fundContract, identityKey, referralCode }: {
   id: string; onBack: () => void; tradingEnabled: boolean; walletAddress: string; walletBalance: (assetId: string) => bigint; walletBalancesAvailable: boolean; popupWallet: boolean; refreshWallet: () => Promise<void>;
-  connectWallet: () => void; prepareFunding?: () => Window; fundContract: FundContract; referralCode?: string
+  connectWallet: () => void; prepareFunding?: () => Window; fundContract: FundContract; identityKey: string; referralCode?: string
 }) {
   const [launch, setLaunch] = useState<Launch | null>(null); const [trades, setTrades] = useState<LaunchTrade[]>([]); const [error, setError] = useState('')
   const [side, setSide] = useState<'buy' | 'sell'>('buy'); const [amount, setAmount] = useState(''); const [quote, setQuote] = useState<LaunchQuoteResponse | null>(null); const [quoteBusy, setQuoteBusy] = useState(false); const [quoteError, setQuoteError] = useState('')
@@ -269,7 +269,7 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, wa
     setTradeBusy(true); setError(''); let fundingTxid: string | undefined; let fundingStarted = false
     try {
       const intent = await request<LaunchRequest>(`/v1/launches/${encodeURIComponent(id)}/trades`, { method: 'POST', body: JSON.stringify({
-        payAddress: walletAddress, side, inputAmount: parsed.raw.toString(), minOutput: quote.quote.outputAmount, ...(referralCode ? { referralCode } : {}),
+        payAddress: walletAddress, side, inputAmount: parsed.raw.toString(), minOutput: quote.quote.outputAmount, identityKey, ...(referralCode ? { referralCode } : {}),
       }) });
       setTradeRequest(intent)
       fundingStarted = true
@@ -353,10 +353,10 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, wa
 const SIMULATED_FIELDS: Array<keyof typeof DEFAULT_FORM> = ['supply', 'virtualBtc', 'graduationThreshold', 'creatorFeeBps', 'protocolFeeBps', 'buyAmount']
 const DEFAULT_FORM = { id: '', name: '', ticker: '', description: '', supply: '1000000000', decimals: '0', virtualBtc: '1000000', graduationThreshold: '9000000', creatorFeeBps: '70', protocolFeeBps: '30', buyAmount: '100000' }
 
-export function CreateLaunchPage({ onBack, tradingEnabled, walletAddress, connectWallet, issueAsset, fundContract, onOpened, referralCode }: {
+export function CreateLaunchPage({ onBack, tradingEnabled, walletAddress, connectWallet, issueAsset, fundContract, onOpened, identityKey, referralCode }: {
   onBack: () => void; tradingEnabled: boolean; walletAddress: string; popupWallet: boolean; connectWallet: () => void;
   issueAsset: (input: { amount: bigint; metadata: { name?: string; ticker: string; decimals: number } }) => Promise<{ assetId: string }>;
-  fundContract: FundContract; onOpened: (id: string) => void; referralCode?: string
+  fundContract: FundContract; onOpened: (id: string) => void; identityKey: string; referralCode?: string
 }) {
   const [form, setForm] = useState(DEFAULT_FORM); const [simulation, setSimulation] = useState<Simulation | null>(null); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [progress, setProgress] = useState('')
   const [simulating, setSimulating] = useState(false)
@@ -391,7 +391,7 @@ export function CreateLaunchPage({ onBack, tradingEnabled, walletAddress, connec
         method: 'POST', body: JSON.stringify({ id: form.id, name: form.name.trim(), ticker: form.ticker.toUpperCase(), description: form.description,
           decimals, supply: form.supply, virtualBtc: form.virtualBtc, graduationThreshold: form.graduationThreshold,
           creatorFeeBps: form.creatorFeeBps, protocolFeeBps: form.protocolFeeBps, creatorAddress: walletAddress,
-          assetId: saved.assetId, controlAssetId: saved.controlAssetId, ...(referralCode ? { referralCode } : {}) }),
+          assetId: saved.assetId, controlAssetId: saved.controlAssetId, identityKey, ...(referralCode ? { referralCode } : {}) }),
       })
       setProgress('4/4 · Fund and atomically open the curve')
       saved.fundingTxid ??= created.bootstrap.fundingTxid ?? await fundContract(created.bootstrap.contractAddress, 'bootstrap', BigInt(form.supply), BigInt(created.bootstrap.fundingSats), saved.assetId, saved.controlAssetId)
