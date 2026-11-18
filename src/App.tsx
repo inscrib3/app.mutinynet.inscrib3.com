@@ -1,20 +1,30 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import './App.css'
+import { api } from './api'
+import { TokenMark } from './components'
+import type { RequestProgress } from './requests'
 import { firstFormError, MAX_WALLET_AMOUNT, MIN_PROTOCOL_FEE_BPS, parseDisplayAmount, rawAmount, validateAssetForm, validatePoolForm, type AssetFormInput, type PoolFormInput } from './form-validation'
+import { comma, displayAmount, editableAmount, poolAssetTickers, short } from './format'
+import { DUST_SATS, depositFundingSats, maxBigInt, minimumSwapOutput, previewLiquidity, swapFundingSats } from './math'
 import { loadSavedPayments, savePayment, type PaymentKind, type SavedPayment } from './open-payments'
 import { describeWalletError, errorMessage, WALLET_INSTALL_URL, type WalletIssue } from './wallet-issues'
 import { CreateLaunchPage, LaunchDetailPage, LaunchesPage, type Launch } from './launches'
 import { connectWithPwaWallet } from './pwa-wallet'
+import { ActivityPage } from './pages/ActivityPage'
+import { CreatePage } from './pages/CreatePage'
+import { FaucetPage } from './pages/FaucetPage'
+import { LeaderboardPage } from './pages/LeaderboardPage'
+import { PoolDetailPage } from './pages/PoolDetailPage'
+import { PoolsPage } from './pages/PoolsPage'
+import { SwapPage } from './pages/SwapPage'
+import type { ActivityEvent, AssetInfo, AssetRisk, BalanceInfo, CatalogAsset, CursorPage, DeploymentInfo, IssueAssetInput, IssueAssetResult, LeaderboardEntry, LeaderboardPage as LeaderboardResult, LiquidityRequest, NetworkInfo, Page, PageResult, PointsSummary, Pool, PoolAssetIssuance, PoolCreation, PoolEligibility, Quote, SwapRequest, WalletActivityEvent } from './types'
 
-const API = import.meta.env.VITE_API_URL ?? '/api'
 const NETWORK = import.meta.env.VITE_NETWORK ?? 'mutinynet'
 if (NETWORK !== 'mutinynet' && NETWORK !== 'mainnet') throw new Error('VITE_NETWORK must be mutinynet or mainnet')
 const NETWORK_LABEL = NETWORK === 'mainnet' ? 'MAINNET' : 'MUTINYNET'
 const WALLET_NETWORK = NETWORK === 'mainnet' ? 'bitcoin' : 'mutinynet'
 const APP_NETWORK_NAME = NETWORK === 'mainnet' ? 'Mainnet' : 'Mutinynet (testnet)'
 const SWITCH_NETWORK_LABEL = NETWORK === 'mainnet' ? 'Switch to Mainnet' : 'Switch to testnet'
-// Every Arkade output the wallet funds carries at least this many sats (the API's DUST).
-const DUST_SATS = 330n
 const OPEN_REQUEST_STATUSES: ReadonlyArray<SwapRequest['status']> = ['pending-funding', 'funded', 'sweeping']
 const EMPTY_ASSET_FORM = { name: '', ticker: '', supply: '', decimals: '0', icon: '' }
 const ASSET_FIELD_LABELS: Record<keyof AssetFormInput, string> = { name: 'Name', ticker: 'Ticker', supply: 'Initial supply', decimals: 'Decimals', icon: 'Icon URL' }
@@ -22,140 +32,6 @@ const POOL_FIELD_LABELS: Partial<Record<keyof PoolFormInput, string>> = { quoteA
 const DEFAULT_POOL_FORM ={ id: '', name: '', baseAssetId: 'btc', quoteAssetId: '', baseAmount: '', quoteAmount: '', feeBps: '100', protocolFeeBps: String(MIN_PROTOCOL_FEE_BPS) }
 const DOCS_URL = 'https://docs.inscrib3.com/app/overview'
 const SOURCE_URL = 'https://github.com/inscrib3/app.mutinynet.inscrib3.com'
-const MUTINYNET_FAUCET_URL = 'https://faucet.mutinynet.com/'
-
-interface DeploymentInfo {
-  ok: boolean
-  network: 'mutinynet' | 'mainnet'
-  platformTreasuryAddress: string
-  poolCreationFeeSats: string
-  ammContractGeneration: 'amm-v2'
-  maxSwapBatch: number
-  maxLiquidityBatch: number
-  launches?: { catalog: boolean; protocol: 'curve-v1'; tradingEnabled: boolean; reason: string }
-}
-
-interface NetworkInfo {
-  network: string
-  displayName: string
-  isTestnet: boolean
-  arkServerUrl: string
-}
-
-interface AssetInfo {
-  assetId: string
-  amount: number
-  displayAmount: number
-  metadata?: { name?: string; ticker?: string; decimals?: number; icon?: string }
-  controlAssetId?: string
-}
-
-interface AssetRisk { assetId: string; controlled: boolean; controlAssetId?: string; supply?: string; metadata?: { name?: string; ticker?: string; decimals?: number; icon?: string } }
-interface CatalogAsset { assetId: string; controlAssetId?: string; supply?: string; metadata?: { name?: string; ticker?: string; decimals?: number; icon?: string } }
-interface PageResult<T> { items: T[]; total: number; nextCursor?: string }
-interface CursorPage<T> { items: T[]; nextCursor?: string }
-type PriceTimeframe = '1m' | '5m' | '15m' | '1h' | '4h' | '24h' | '7d' | '30d'
-interface PricePoint { recordedAt: number; baseReserve: string; quoteReserve: string; txid: string }
-interface PriceHistory { poolId: string; timeframe: PriceTimeframe; baseAssetId: string; quoteAssetId: string; priceUnit: 'raw-reserves'; points: PricePoint[] }
-
-interface BalanceInfo { available: number; total: number }
-
-interface Pool {
-  id: string
-  name: string
-  baseAssetId: string
-  quoteAssetId: string
-  lpAssetId: string
-  feeBps: number
-  protocolFeeBps: number
-  treasuryAddress: string
-  creationFeeSats: string
-  accruedBaseFees?: string
-  accruedQuoteFees?: string
-  baseReserve?: string
-  quoteReserve?: string
-  lpSupply?: string
-  available: boolean
-  error?: string
-  baseAssetInfo?: AssetRisk
-  quoteAssetInfo?: AssetRisk
-  swaps24h?: number
-  liquidityEvents24h?: number
-  activity24h?: number
-  onFire?: boolean
-  contractGeneration: 'amm-v1' | 'amm-v2'
-  lifecycle: 'active' | 'withdraw-only' | 'closed'
-  swapEnabled: boolean
-  depositEnabled: boolean
-  withdrawalEnabled: boolean
-}
-
-interface Quote {
-  outputAmount: string
-  inputAmount?: string
-  requestedOutputAmount?: string
-  priceImpactBps: number
-  poolTxid: string
-  protocolFeeBps: number
-  lpFeeBps: number
-  carrierFeeSats: string
-  rewardPoints: string
-}
-
-interface SwapRequest {
-  id: string
-  poolId?: string
-  status: 'pending-funding' | 'funded' | 'sweeping' | 'settled' | 'refunded' | 'failed'
-  contractAddress: string
-  sellAssetId?: string
-  sellAmount?: string
-  fundingSats: string
-  rewardPoints?: string
-  fundingTxid?: string
-  settlementTxid?: string
-  error?: string
-  createdAt?: number
-}
-
-interface LiquidityRequest extends Omit<SwapRequest, 'fundingSats'> {
-  kind: 'deposit' | 'withdraw'
-  baseAmount: string
-  quoteAmount: string
-  lpAmount: string
-}
-type ActivityEvent = (SwapRequest & { activityType: 'swap' }) | (LiquidityRequest & { activityType: 'deposit' | 'withdraw' })
-interface LaunchActivityRequest { id: string; launchId: string; venue: 'curve' | 'pool'; side: 'buy' | 'sell'; inputAmount: string; rewardPoints: string; fundingTxid?: string; settlementTxid?: string; status: 'pending-funding' | 'funded' | 'settling' | 'settled' | 'refunded' | 'failed'; createdAt: number; activityType: 'launch-trade' }
-type WalletActivityEvent = ActivityEvent | LaunchActivityRequest
-interface PointsSummary { identityKey: string; total: string; poolPoints: string; swapPoints: string; launchPoints: string; launchTradePoints: string; referralPoints: string; referralCode: string; referredUsers: number; rank?: number; participants: number; portableToMainnet: true }
-interface LeaderboardEntry { rank: number; identityKey: string; address: string; total: string; poolPoints: string; swapPoints: string; launchPoints: string; launchTradePoints: string; referralPoints: string }
-interface LeaderboardPage { items: LeaderboardEntry[]; total: number; nextOffset?: number }
-
-interface IssueAssetResult { arkTxId: string; assetId: string }
-interface IssueAssetInput {
-  amount: number
-  controlAssetId?: string
-  metadata?: { name?: string; ticker?: string; decimals?: number; icon?: string }
-}
-interface PoolAssetIssuance {
-  key: string
-  control: IssueAssetResult
-  lp?: IssueAssetResult
-  ledger?: IssueAssetResult
-}
-interface PoolCreation {
-  id: string
-  pool: Pool
-  baseAmount: string
-  quoteAmount: string
-  bootstrapAddress: string
-  bootstrapSats: string
-  status: 'awaiting-funding' | 'opened'
-  fundingTxid?: string
-  openingTxid?: string
-}
-interface PoolEligibility { eligible: boolean; assetId?: string; launchId?: string; phase?: string; reason?: string }
-
-type Page = 'swap' | 'launches' | 'launch' | 'launch-create' | 'pools' | 'pool' | 'create' | 'faucet' | 'leaderboard' | 'activity'
 
 function routeFromLocation(): { page: Page; poolId?: string; launchId?: string } {
   const parts = window.location.pathname.split('/').filter(Boolean)
@@ -216,30 +92,6 @@ interface ArkadeProvider {
 declare global { interface Window { arkade?: ArkadeProvider } }
 type WalletMode = 'extension' | 'pwa'
 
-const short = (value: string, edge = 5) => value.length > edge * 2 ? `${value.slice(0, edge)}…${value.slice(-edge)}` : value
-const comma = (value: string | bigint) => BigInt(value).toLocaleString()
-
-function ratio(numerator: bigint, denominator: bigint, precision = 8): string {
-  if (denominator === 0n) return '—'
-  let displayPrecision = precision
-  let scale = 10n ** BigInt(displayPrecision)
-  let scaled = (numerator * scale) / denominator
-  // Eight decimal places are normally enough, but BTC-denominated prices can
-  // legitimately be smaller than one satoshi per whole token. Do not render
-  // those non-zero ratios as zero.
-  if (scaled === 0n && numerator !== 0n && displayPrecision < 18) {
-    displayPrecision = 18
-    scale = 10n ** BigInt(displayPrecision)
-    scaled = (numerator * scale) / denominator
-  }
-  if (scaled === 0n && numerator !== 0n) return `< 0.${'0'.repeat(displayPrecision - 1)}1`
-  const whole = scaled / scale
-  const fraction = (scaled % scale).toString().padStart(displayPrecision, '0').replace(/0+$/, '')
-  return fraction ? `${whole.toLocaleString()}.${fraction}` : whole.toLocaleString()
-}
-
-function maxBigInt(a: bigint, b: bigint): bigint { return a > b ? a : b }
-
 function walletNumber(value: bigint, name: string): number {
   if (value < 0n || value > MAX_WALLET_AMOUNT) throw new Error(`${name} exceeds the wallet safe integer range`)
   return Number(value)
@@ -288,189 +140,6 @@ async function waitForWalletAssets(provider: ArkadeProvider, required: Array<{ a
     await new Promise<void>((resolve) => window.setTimeout(resolve, 1_500))
   }
   throw new Error('Issued assets are not spendable in the wallet yet. Wait a moment and retry; the saved asset IDs will be reused and no assets will be issued twice.')
-}
-
-function displayAmount(value: string | bigint, decimals: number, precision = 6): string {
-  const raw = BigInt(value)
-  if (decimals === 0) return raw.toLocaleString()
-  const scale = 10n ** BigInt(decimals)
-  const whole = raw / scale
-  const fraction = (raw % scale).toString().padStart(decimals, '0').slice(0, precision).replace(/0+$/, '')
-  return fraction ? `${whole.toLocaleString()}.${fraction}` : whole.toLocaleString()
-}
-
-function editableAmount(value: string | bigint, decimals: number): string {
-  const raw = BigInt(value)
-  if (decimals === 0) return raw.toString()
-  const scale = 10n ** BigInt(decimals)
-  const whole = raw / scale
-  const fraction = (raw % scale).toString().padStart(decimals, '0').replace(/0+$/, '')
-  return fraction ? `${whole}.${fraction}` : whole.toString()
-}
-
-async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(`${API}${path}`, {
-    ...init,
-    headers: { 'content-type': 'application/json', ...init?.headers },
-  })
-  const body = await response.json() as T & { error?: string }
-  if (!response.ok) throw new Error(body.error ?? `Request failed (${response.status})`)
-  return body
-}
-
-function TokenMark({ label, warm = false }: { label: string; warm?: boolean }) {
-  return <span className={`token-mark ${warm ? 'warm' : ''}`}>{label.slice(0, 1).toUpperCase()}</span>
-}
-
-function Spinner() { return <span className="spinner" aria-hidden="true" /> }
-
-const PRICE_TIMEFRAMES: PriceTimeframe[] = ['1m', '5m', '15m', '1h', '4h', '24h', '7d', '30d']
-
-function normalizedPrice(point: PricePoint, baseDecimals: number, quoteDecimals: number): number {
-  return (Number(point.baseReserve) / Number(point.quoteReserve)) * 10 ** (quoteDecimals - baseDecimals)
-}
-
-function formatPrice(value: number): string {
-  if (!Number.isFinite(value)) return '—'
-  if (value === 0) return '0'
-  if (Math.abs(value) < 0.00000001) {
-    const decimalPlaces = Math.min(18, Math.max(8, 6 - Math.floor(Math.log10(Math.abs(value)))))
-    const decimal = value.toFixed(decimalPlaces).replace(/0+$/, '').replace(/\.$/, '')
-    return decimal === '0' || decimal === '-0' ? value.toExponential(6) : decimal
-  }
-  return value.toLocaleString(undefined, { maximumSignificantDigits: 10 })
-}
-
-function formatChartTime(timestamp: number, timeframe: PriceTimeframe): string {
-  const date = new Date(timestamp)
-  if (timeframe === '1m' || timeframe === '5m') return date.toLocaleTimeString([], { minute: '2-digit', second: '2-digit' })
-  if (timeframe === '7d' || timeframe === '30d') return date.toLocaleDateString([], { month: 'short', day: 'numeric' })
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-}
-
-function formatChartTooltipTime(timestamp: number): string {
-  return new Date(timestamp).toLocaleString([], {
-    month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit',
-  })
-}
-
-function PriceChart({ pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals }: {
-  pool: Pool; baseTicker: string; quoteTicker: string; baseDecimals: number; quoteDecimals: number
-}) {
-  const [timeframe, setTimeframe] = useState<PriceTimeframe>('4h')
-  const [points, setPoints] = useState<PricePoint[]>([])
-  const [chartError, setChartError] = useState('')
-  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null)
-
-  useEffect(() => {
-    const controller = new AbortController()
-    const load = () => api<PriceHistory>(`/v1/pools/${encodeURIComponent(pool.id)}/prices?timeframe=${timeframe}`, { signal: controller.signal })
-      .then((history) => { setPoints(Array.isArray(history.points) ? history.points : []); setChartError('') })
-      .catch((cause: unknown) => { if ((cause as Error).name !== 'AbortError') setChartError(cause instanceof Error ? cause.message : String(cause)) })
-    void load()
-    const refresh = window.setInterval(() => void load(), 15_000)
-    return () => { controller.abort(); window.clearInterval(refresh) }
-  }, [pool.id, timeframe])
-
-  const series = points.map((point) => ({ ...point, price: normalizedPrice(point, baseDecimals, quoteDecimals) }))
-    .filter((point) => Number.isFinite(point.price))
-  const prices = series.map((point) => point.price)
-  const latest = prices.at(-1)
-  const first = prices[0]
-  const change = first && latest !== undefined ? ((latest - first) / first) * 100 : 0
-  const min = prices.length ? Math.min(...prices) : 0
-  const max = prices.length ? Math.max(...prices) : 0
-  const spread = max - min || Math.max(Math.abs(max) * 0.02, 1e-12)
-  const firstTime = series[0]?.recordedAt ?? 0
-  const lastTime = series.at(-1)?.recordedAt ?? firstTime
-  const coordinates = series.map((point) => {
-    const x = firstTime === lastTime ? 300 : 18 + ((point.recordedAt - firstTime) / (lastTime - firstTime)) * 564
-    const y = 162 - ((point.price - (min - spread * 0.08)) / (spread * 1.16)) * 144
-    return { x, y }
-  })
-  const chartPoints = coordinates.map(({ x, y }) => `${x.toFixed(2)},${y.toFixed(2)}`).join(' ')
-  const lastCoordinate = coordinates.at(-1)
-  const hoveredCoordinate = hoveredIndex === null ? undefined : coordinates[hoveredIndex]
-  const hoveredPoint = hoveredIndex === null ? undefined : series[hoveredIndex]
-  const displayInSats = baseTicker === 'BTC' && latest !== undefined && latest > 0 && latest < 0.00000001
-  const displayUnit = displayInSats ? 'sats' : baseTicker
-  const displayPrice = (value: number) => formatPrice(value * (displayInSats ? 100_000_000 : 1))
-  const emptyMessage = timeframe === '30d'
-    ? 'No recorded price history for this pool yet.'
-    : 'No price updates in this timeframe. Try a longer range.'
-
-  return <section className="price-chart">
-    <div className="price-chart-head">
-      <div><span>DISPLAY PRICE · DECIMALS APPLIED</span><div><h3>{displayUnit} per {quoteTicker}</h3>{latest !== undefined && <b>{displayPrice(latest)}</b>}<em className={change >= 0 ? 'positive' : 'negative'}>{change >= 0 ? '+' : ''}{change.toFixed(2)}%</em></div></div>
-      <div className="price-timeframes">{PRICE_TIMEFRAMES.map((value) => <button key={value} className={timeframe === value ? 'active' : ''} onClick={() => setTimeframe(value)}>{value.toUpperCase()}</button>)}</div>
-    </div>
-    <div className="price-chart-canvas" onPointerMove={(event) => {
-      if (!coordinates.length) return
-      const bounds = event.currentTarget.getBoundingClientRect()
-      const contentWidth = Math.max(bounds.width - 28, 1)
-      const chartX = Math.min(600, Math.max(0, ((event.clientX - bounds.left - 14) / contentWidth) * 600))
-      let nearest = 0
-      for (let index = 1; index < coordinates.length; index += 1) {
-        if (Math.abs(coordinates[index]!.x - chartX) < Math.abs(coordinates[nearest]!.x - chartX)) nearest = index
-      }
-      setHoveredIndex(nearest)
-    }} onPointerLeave={() => setHoveredIndex(null)}>
-      {prices.length ? <svg viewBox="0 0 600 180" role="img" aria-label={`${displayUnit} per ${quoteTicker} price chart`} preserveAspectRatio="none">
-        <defs><linearGradient id={`price-fill-${pool.id}`} x1="0" y1="0" x2="0" y2="1"><stop offset="0" stopColor="#34d399" stopOpacity=".24" /><stop offset="1" stopColor="#34d399" stopOpacity="0" /></linearGradient></defs>
-        {[36, 72, 108, 144].map((y) => <line key={y} x1="0" x2="600" y1={y} y2={y} className="chart-grid" />)}
-        {prices.length > 1 && <polygon points={`18,180 ${chartPoints} 582,180`} fill={`url(#price-fill-${pool.id})`} />}
-        <polyline points={chartPoints} className="chart-line" />
-      </svg> : <div className="chart-empty">{chartError || emptyMessage}</div>}
-      {prices.length > 0 && <div className="chart-overlay" aria-hidden="true">
-        {lastCoordinate && <span className="chart-marker chart-last" style={{ left: `${lastCoordinate.x / 6}%`, top: `${lastCoordinate.y / 1.8}%` }} />}
-        {hoveredCoordinate && hoveredPoint && <>
-          <span className="chart-hover-guide" style={{ left: `${hoveredCoordinate.x / 6}%` }} />
-          <span className="chart-marker chart-hover-marker" style={{ left: `${hoveredCoordinate.x / 6}%`, top: `${hoveredCoordinate.y / 1.8}%` }} />
-          <div className="chart-tooltip" style={{
-            left: `${hoveredCoordinate.x / 6}%`, top: `${hoveredCoordinate.y / 1.8}%`,
-            transform: hoveredCoordinate.x > 450
-              ? hoveredCoordinate.y < 60 ? 'translate(calc(-100% - 12px), 12px)' : 'translate(calc(-100% - 12px), calc(-100% - 10px))'
-              : hoveredCoordinate.y < 60 ? 'translate(12px, 12px)' : 'translate(12px, calc(-100% - 10px))',
-          }}><span>{displayUnit} per {quoteTicker}</span><b>{displayPrice(hoveredPoint.price)}</b><small>{formatChartTooltipTime(hoveredPoint.recordedAt)}</small></div>
-        </>}
-      </div>}
-    </div>
-    <div className="price-chart-foot"><span>{series[0] ? formatChartTime(series[0].recordedAt, timeframe) : '—'}</span><span>{displayInSats ? 'Marginal spot shown in sats · settlement uses whole sats' : `Normalized using ${baseTicker} (${baseDecimals}) and ${quoteTicker} (${quoteDecimals}) decimals`}</span><span>{series.at(-1) ? formatChartTime(series.at(-1)!.recordedAt, timeframe) : '—'}</span></div>
-  </section>
-}
-
-// Empty fields stay quiet; the submit button already says what is missing.
-function FieldError({ message, value }: { message?: string; value: string }) {
-  if (!message || value.trim() === '') return null
-  return <span className="field-error" role="alert">{message}</span>
-}
-
-interface RequestProgress { status: SwapRequest['status']; fundingTxid?: string; settlementTxid?: string; error?: string }
-
-function describeRequest(noun: string, request: RequestProgress): { title: string; detail: string } {
-  switch (request.status) {
-    case 'settled': return { title: `${noun} complete`, detail: `Settlement ${short(request.settlementTxid ?? '')}` }
-    case 'failed': return { title: `${noun} failed`, detail: request.error ?? 'The request could not be completed.' }
-    case 'refunded': return { title: `${noun} refunded`, detail: `Refund ${short(request.settlementTxid ?? '')}. Your funds are back, so you can retry.` }
-    case 'funded':
-    case 'sweeping': return { title: `${noun} funded`, detail: 'Waiting for the next pool sweep…' }
-    case 'pending-funding': return request.fundingTxid
-      ? { title: 'Payment sent, not registered yet', detail: `Payment ${short(request.fundingTxid, 7)} reached the contract, but the server has not registered it. Retry registration; do not pay again.` }
-      : { title: `${noun} created`, detail: 'Waiting for the wallet payment…' }
-  }
-}
-
-function RequestNotice({ noun, request, busy, onDismiss, onRetryRegistration }: {
-  noun: string; request: RequestProgress; busy: boolean; onDismiss: () => void; onRetryRegistration: () => void
-}) {
-  const { title, detail } = describeRequest(noun, request)
-  const paymentUnregistered = request.status === 'pending-funding' && Boolean(request.fundingTxid)
-  return <div className={`notice status ${request.status}`}>
-    <b>{title}</b><span>{detail}</span>
-    {request.status === 'failed' && <button type="button" className="notice-dismiss" onClick={onDismiss}>Dismiss</button>}
-    {paymentUnregistered && <button type="button" className="notice-dismiss" onClick={onRetryRegistration} disabled={busy}>Retry registration</button>}
-    {request.status !== 'failed' && !paymentUnregistered && <i />}
-  </div>
 }
 
 function isRequestLocked(request: RequestProgress | null): boolean {
@@ -599,20 +268,9 @@ function App() {
   const quoteDecimals = pool?.quoteAssetInfo?.metadata?.decimals ?? quoteAsset?.metadata?.decimals ?? (pool?.quoteAssetId === 'btc' ? 8 : 0)
   const lpDecimals = lpAsset?.metadata?.decimals ?? baseDecimals
   const liquidityRaw = rawAmount(liquidityAmount, mode === 'withdraw' ? lpDecimals : baseDecimals)
-  const liquidityPreview = (() => {
-    if (!pool?.baseReserve || !pool.quoteReserve || !pool.lpSupply || !liquidityRaw) return null
-    const poolIsEmpty = BigInt(pool.baseReserve) === 0n || BigInt(pool.lpSupply) === 0n
-    if (poolIsEmpty) return null
-    if (mode === 'deposit') return {
-      base: liquidityRaw, quote: (liquidityRaw * BigInt(pool.quoteReserve)) / BigInt(pool.baseReserve),
-      lp: (liquidityRaw * BigInt(pool.lpSupply)) / BigInt(pool.baseReserve),
-    }
-    if (mode === 'withdraw') return {
-      base: (BigInt(pool.baseReserve) * liquidityRaw) / BigInt(pool.lpSupply),
-      quote: (BigInt(pool.quoteReserve) * liquidityRaw) / BigInt(pool.lpSupply), lp: liquidityRaw,
-    }
-    return null
-  })()
+  const liquidityPreview = (mode === 'deposit' || mode === 'withdraw') && liquidityRaw
+    ? previewLiquidity(mode, liquidityRaw, pool?.baseReserve, pool?.quoteReserve, pool?.lpSupply)
+    : null
   const controlledPoolAssets = pool ? [pool.baseAssetInfo, pool.quoteAssetInfo].filter((info): info is AssetRisk => Boolean(info?.controlled)) : []
   const selectedCreationAssets = [poolForm.baseAssetId, poolForm.quoteAssetId]
     .filter((id) => id && id !== 'btc').map((id) => assets.find((asset) => asset.assetId === id)).filter((asset): asset is AssetInfo => Boolean(asset))
@@ -909,7 +567,7 @@ function App() {
     setGlobalLeaderboardLoading(true); setGlobalLeaderboardError('')
     try {
       const query = leaderboardQuery.trim() ? `&q=${encodeURIComponent(leaderboardQuery.trim())}` : ''
-      const result = await api<LeaderboardPage>(`/v1/points/leaderboard?limit=25&offset=${globalLeaderboardOffset}${query}`)
+      const result = await api<LeaderboardResult>(`/v1/points/leaderboard?limit=25&offset=${globalLeaderboardOffset}${query}`)
       setGlobalLeaderboard((current) => [...current, ...result.items]); setGlobalLeaderboardTotal(result.total); setGlobalLeaderboardOffset(result.nextOffset)
     } catch (cause) { setGlobalLeaderboardError(cause instanceof Error ? cause.message : 'Leaderboard unavailable') }
     finally { setGlobalLeaderboardLoading(false) }
@@ -962,7 +620,7 @@ function App() {
     const timer = window.setTimeout(() => {
       setGlobalLeaderboardLoading(true); setGlobalLeaderboardError('')
       const query = leaderboardQuery.trim() ? `&q=${encodeURIComponent(leaderboardQuery.trim())}` : ''
-      void api<LeaderboardPage>(`/v1/points/leaderboard?limit=25${query}`, { signal: controller.signal })
+      void api<LeaderboardResult>(`/v1/points/leaderboard?limit=25${query}`, { signal: controller.signal })
         .then((result) => { setGlobalLeaderboard(result.items); setGlobalLeaderboardTotal(result.total); setGlobalLeaderboardOffset(result.nextOffset) })
         .catch((cause) => { if (!controller.signal.aborted) setGlobalLeaderboardError(cause instanceof Error ? cause.message : 'Leaderboard unavailable') })
         .finally(() => { if (!controller.signal.aborted) setGlobalLeaderboardLoading(false) })
@@ -1205,14 +863,14 @@ function App() {
     return address ? switchWalletNetwork() : connect()
   }
 
-  async function sendWalletBtc(addressToPay: string, amount: bigint, label: string, _popup?: Window): Promise<string> {
+  async function sendWalletBtc(addressToPay: string, amount: bigint, label: string): Promise<string> {
     const safeAmount = walletNumber(amount, label)
     if (!window.arkade) throw new Error('Connect Inscrib3 Wallet first.')
     await assertWalletNetwork(window.arkade)
     return window.arkade.sendToAddress(addressToPay, safeAmount)
   }
 
-  async function sendWalletAssets(addressToPay: string, assetsToPay: Array<{ assetId: string; amount: number }>, bitcoinAmount: number | undefined, _popup?: Window): Promise<string> {
+  async function sendWalletAssets(addressToPay: string, assetsToPay: Array<{ assetId: string; amount: number }>, bitcoinAmount: number | undefined): Promise<string> {
     if (!window.arkade) throw new Error('Connect Inscrib3 Wallet first.')
     await assertWalletNetwork(window.arkade)
     return window.arkade.sendAsset(addressToPay, assetsToPay, bitcoinAmount)
@@ -1225,9 +883,9 @@ function App() {
   }
 
   async function fundLaunchContract(contractAddress: string, side: 'buy' | 'sell' | 'bootstrap', input: bigint,
-    fundingSats: bigint, tokenAssetId?: string, controlAssetId?: string, popup?: Window): Promise<string> {
+    fundingSats: bigint, tokenAssetId?: string, controlAssetId?: string): Promise<string> {
     if (!walletReady) throw new Error('Connect Inscrib3 Wallet on the correct network first.')
-    if (side === 'buy') return sendWalletBtc(contractAddress, fundingSats, 'launch buy funding', popup)
+    if (side === 'buy') return sendWalletBtc(contractAddress, fundingSats, 'launch buy funding')
     if (!window.arkade) throw new Error('Connect Inscrib3 Wallet first.')
     if (!tokenAssetId) throw new Error('Launch token asset ID is missing.')
     if (side === 'bootstrap' && !controlAssetId) throw new Error('Launch control asset ID is missing.')
@@ -1239,7 +897,7 @@ function App() {
     const assets = side === 'sell'
       ? [{ assetId: tokenAssetId, amount: walletNumber(input, 'launch token funding') }]
       : [{ assetId: tokenAssetId, amount: walletNumber(input, 'launch token supply') }, { assetId: controlAssetId!, amount: 1 }]
-    return sendWalletAssets(contractAddress, assets, walletNumber(fundingSats, 'launch contract satoshis'), popup)
+    return sendWalletAssets(contractAddress, assets, walletNumber(fundingSats, 'launch contract satoshis'))
   }
 
   async function createAsset() {
@@ -1279,13 +937,13 @@ function App() {
       const duplicate = candidates.items.find((candidate) => candidate.lifecycle === 'active' && [candidate.baseAssetId, candidate.quoteAssetId].includes(poolForm.baseAssetId)
         && [candidate.baseAssetId, candidate.quoteAssetId].includes(poolForm.quoteAssetId))
       if (duplicate) throw new Error(`A pool already exists for this pair (${duplicate.name}).`)
-      const stem = poolForm.name.toUpperCase().replace(/[^A-Z0-9_-]/g, '').slice(0, 9) || 'POOL'
-      const issuanceKey = JSON.stringify([WALLET_NETWORK, address, poolForm.id, stem, baseAmount.toString(), baseDecimals])
+      const tickers = poolAssetTickers(poolForm.name)
+      const issuanceKey = JSON.stringify([WALLET_NETWORK, address, poolForm.id, tickers.stem, baseAmount.toString(), baseDecimals])
       let issued = poolAssetIssuance?.key === issuanceKey ? poolAssetIssuance : null
       let control = issued?.control
       if (!control) {
         setCreationStep('1/5 · Issue the pool control asset')
-        control = await issueAssetWithRetry(window.arkade, { amount: 1, metadata: { ticker: `${stem}-CTRL`.slice(0, 16), decimals: 0 } },
+        control = await issueAssetWithRetry(window.arkade, { amount: 1, metadata: { ticker: tickers.control, decimals: 0 } },
           () => setCreationStep('1/5 · Refresh wallet state and retry control asset'))
         issued = { key: issuanceKey, control }
         setPoolAssetIssuance(issued)
@@ -1293,7 +951,7 @@ function App() {
       let lp = issued?.lp
       if (!lp) {
         setCreationStep('2/5 · Issue LP tokens')
-        lp = await issueAssetWithRetry(window.arkade, { amount: safeBase, controlAssetId: control.assetId, metadata: { ticker: `${stem}-LP`.slice(0, 16), decimals: baseDecimals } },
+        lp = await issueAssetWithRetry(window.arkade, { amount: safeBase, controlAssetId: control.assetId, metadata: { ticker: tickers.lp, decimals: baseDecimals } },
           () => setCreationStep('2/5 · Refresh wallet state and retry LP tokens'))
         issued = { ...issued!, lp }
         setPoolAssetIssuance(issued)
@@ -1301,7 +959,7 @@ function App() {
       let ledger = issued?.ledger
       if (!ledger) {
         setCreationStep('3/5 · Issue the covenant ledger asset')
-        ledger = await issueAssetWithRetry(window.arkade, { amount: safeBase, controlAssetId: control.assetId, metadata: { ticker: `${stem}-LEDGER`.slice(0, 16), decimals: 0 } },
+        ledger = await issueAssetWithRetry(window.arkade, { amount: safeBase, controlAssetId: control.assetId, metadata: { ticker: tickers.ledger, decimals: 0 } },
           () => setCreationStep('3/5 · Refresh wallet state and retry ledger asset'))
         issued = { ...issued!, ledger }
         setPoolAssetIssuance(issued)
@@ -1361,14 +1019,11 @@ function App() {
     if (!walletReady) return requireWallet()
     if (!pool || !raw || !quote || swapBlocker) return
     if (!window.arkade) return
-    const walletPopup: Window | undefined = undefined
     setBusy(true); setError(''); setRequest(null)
     let fundingTxid: string | undefined
     try {
       await assertWalletNetwork(window.arkade)
-      const minOutput = quoteMode === 'output' && receiveRaw
-        ? receiveRaw
-        : (BigInt(quote.outputAmount) * BigInt(10_000 - slippage)) / 10_000n
+      const minOutput = swapMinimumOutput(quote)
       const intent = await api<SwapRequest>(`/v1/pools/${pool.id}/swaps`, {
         method: 'POST', body: JSON.stringify({ payAddress: address, sellAssetId, sellAmount: raw.toString(), minOutput: minOutput.toString(),
           identityKey, ...(referralCode ? { referralCode } : {}) }),
@@ -1376,8 +1031,8 @@ function App() {
       setRequest(intent)
       const fundingSats = walletNumber(BigInt(intent.fundingSats), 'swap BTC funding')
       fundingTxid = sellAssetId === 'btc'
-        ? await sendWalletBtc(intent.contractAddress, BigInt(intent.fundingSats), 'swap BTC funding', walletPopup)
-        : await sendWalletAssets(intent.contractAddress, [{ assetId: sellAssetId, amount: walletNumber(raw, 'asset funding') }], fundingSats, walletPopup)
+        ? await sendWalletBtc(intent.contractAddress, BigInt(intent.fundingSats), 'swap BTC funding')
+        : await sendWalletAssets(intent.contractAddress, [{ assetId: sellAssetId, amount: walletNumber(raw, 'asset funding') }], fundingSats)
       setRequest(await registerFunding<SwapRequest>(`/v1/swaps/${intent.id}`, fundingTxid))
     } catch (cause) { reportFundingFailure(cause, fundingTxid, setRequest) }
     finally { setBusy(false) }
@@ -1410,7 +1065,6 @@ function App() {
     if (!walletReady) return requireWallet()
     if (!pool || !liquidityRaw || !liquidityPreview || mode === 'swap' || liquidityBlocker) return
     if (!window.arkade) return
-    const walletPopup: Window | undefined = undefined
     setBusy(true); setError(''); setLiquidityRequest(null)
     let fundingTxid: string | undefined
     try {
@@ -1423,8 +1077,8 @@ function App() {
         ? [...(pool.baseAssetId === 'btc' ? [] : [{ assetId: pool.baseAssetId, amount: walletNumber(BigInt(intent.baseAmount), 'base funding') }]), { assetId: pool.quoteAssetId, amount: walletNumber(BigInt(intent.quoteAmount), 'quote funding') }]
         : [{ assetId: pool.lpAssetId, amount: walletNumber(BigInt(intent.lpAmount), 'LP funding') }]
       fundingTxid = await sendWalletAssets(intent.contractAddress, fundingAssets, mode === 'deposit'
-        ? walletNumber(depositFundingSats(pool, BigInt(intent.baseAmount)), 'deposit BTC funding')
-        : undefined, walletPopup)
+        ? walletNumber(depositFundingSats(pool.baseAssetId, BigInt(intent.baseAmount)), 'deposit BTC funding')
+        : undefined)
       setLiquidityRequest(await registerFunding<LiquidityRequest>(`/v1/liquidity/${intent.id}`, fundingTxid))
     } catch (cause) { reportFundingFailure(cause, fundingTxid, setLiquidityRequest) }
     finally { setBusy(false) }
@@ -1444,6 +1098,10 @@ function App() {
     : currentPoolEligibility && !currentPoolEligibility.eligible ? currentPoolEligibility.reason ?? 'This pair is reserved for the launch market'
     : deployment ? firstFormError(poolValidation.errors, POOL_FIELD_LABELS) : 'Pool creation is unavailable right now'
 
+  function swapMinimumOutput(swapQuote: Quote): bigint {
+    return quoteMode === 'output' && receiveRaw ? receiveRaw : minimumSwapOutput(BigInt(swapQuote.outputAmount), slippage)
+  }
+
   function describeSwapBlocker(): string | null {
     if (!paymentsRestored) return 'Checking unfinished payments…'
     if (request && swapLocked) return request.status === 'failed' ? 'Dismiss the failed swap to retry' : 'Swap in progress…'
@@ -1454,13 +1112,9 @@ function App() {
     if ('error' in typedAmount) return typedAmount.error
     if (raw && raw > walletBalance(sellAssetId)) return `Insufficient ${sellTicker} balance`
     if (!quote) return 'Finding best price…'
-    if (raw && swapFundingSats(raw, quote) > walletBalance('btc')) return sellAssetId === 'btc' ? 'Insufficient BTC balance (network fee included)' : 'Not enough BTC for the network fee'
+    if (swapMinimumOutput(quote) <= 0n) return `Amount too small: the minimum ${buyTicker} received rounds to zero`
+    if (raw && swapFundingSats(raw, sellAssetId, quote.carrierFeeSats) > walletBalance('btc')) return sellAssetId === 'btc' ? 'Insufficient BTC balance (network fee included)' : 'Not enough BTC for the network fee'
     return null
-  }
-
-  // Mirrors the API's swapFundingSats: the BTC the wallet sends with a swap.
-  function swapFundingSats(sellAmount: bigint, swapQuote: Quote): bigint {
-    return DUST_SATS + (sellAssetId === 'btc' ? sellAmount : BigInt(swapQuote.carrierFeeSats))
   }
 
   function describeLiquidityBlocker(): string | null {
@@ -1472,21 +1126,29 @@ function App() {
     const typedAmount = parseDisplayAmount(liquidityAmount, mode === 'withdraw' ? lpDecimals : baseDecimals)
     if ('error' in typedAmount) return typedAmount.error
     if (!liquidityPreview) return 'Pool reserves unavailable'
+    const zeroTicker = liquidityZeroTicker(liquidityPreview)
+    if (zeroTicker) return `Amount too small: the ${zeroTicker} ${mode === 'withdraw' ? 'returned' : 'required'} rounds to zero`
     const shortTicker = liquidityShortfallTicker(pool, liquidityPreview)
     if (shortTicker) return `Insufficient ${shortTicker} balance`
     return null
+  }
+
+  // The API rejects a deposit or withdrawal in which any amount rounds to zero.
+  function liquidityZeroTicker(preview: { base: bigint; quote: bigint; lp: bigint }): string | null {
+    if (mode === 'withdraw') {
+      if (preview.base <= 0n) return baseTicker
+      return preview.quote <= 0n ? quoteTicker : null
+    }
+    if (preview.quote <= 0n) return quoteTicker
+    return preview.lp <= 0n ? 'LP' : null
   }
 
   function liquidityShortfallTicker(target: Pool, preview: { base: bigint; quote: bigint; lp: bigint }): string | null {
     if (mode === 'withdraw') return preview.lp > walletBalance(target.lpAssetId) ? 'LP' : null
     if (preview.base > walletBalance(target.baseAssetId)) return baseTicker
     if (preview.quote > walletBalance(target.quoteAssetId)) return quoteTicker
-    if (depositFundingSats(target, preview.base) > walletBalance('btc')) return 'BTC (network fee included)'
+    if (depositFundingSats(target.baseAssetId, preview.base) > walletBalance('btc')) return 'BTC (network fee included)'
     return null
-  }
-
-  function depositFundingSats(target: Pool, baseAmount: bigint): bigint {
-    return DUST_SATS + (target.baseAssetId === 'btc' ? baseAmount : 0n)
   }
 
   return (
@@ -1523,305 +1185,16 @@ function App() {
       </div>}
 
       <main>
-        {page === 'swap' ? <>
-        <section className="intro">
-          <span className="eyebrow"><i /> PROGRAMMABLE BITCOIN / AMM</span>
-          <h1>Native liquidity.<br /><em>Built on Bitcoin.</em></h1>
-          <p>Swap BTC and Arkade assets through covenant-enforced liquidity. No bridges, no wrapped Bitcoin, no custody.</p>
-        </section>
-
-        {(onFirePool && onFireBase && onFireQuote || onFireLaunch) && <div className="fire-route-grid">
-          {onFirePool && onFireBase && onFireQuote && <section className="fire-route-banner">
-            <div className="fire-route-icon" aria-hidden="true">🔥</div>
-            <div className="marks"><TokenMark label={onFireBase.ticker} /><TokenMark label={onFireQuote.ticker} warm /></div>
-            <div className="fire-route-copy"><span>ON FIRE · TRENDING POOL</span><h2>{onFireBase.ticker} / {onFireQuote.ticker}</h2><p>{onFirePool.activity24h ?? 0} settled actions in the last 24 hours · {onFirePool.feeBps / 100}% total fee</p></div>
-            <button className="secondary" disabled={pool?.id === onFirePool.id && mode === 'swap'} onClick={() => switchToPool(onFirePool)}>{pool?.id === onFirePool.id && mode === 'swap' ? 'Active pair' : 'Switch pool'}</button>
-          </section>}
-          {onFireLaunch && <section className="fire-route-banner launch-fire-route">
-            <div className="fire-route-icon" aria-hidden="true">🔥</div>
-            <div className="marks"><TokenMark label={onFireLaunch.ticker} warm /></div>
-            <div className="fire-route-copy"><span>ON FIRE · TRENDING LAUNCH</span><h2>{onFireLaunch.name} · ${onFireLaunch.ticker}</h2><p>{onFireLaunch.trades24h} settled trades · {displayAmount(onFireLaunch.volumeBtc24h, 8, 8)} BTC volume in 24h</p></div>
-            <button className="secondary" onClick={() => navigate('launch', onFireLaunch.id)}>View launch</button>
-          </section>}
-        </div>}
-
-        {pool?.available && <PriceChart key={`swap-${pool.id}`} pool={pool} baseTicker={baseTicker} quoteTicker={quoteTicker} baseDecimals={baseDecimals} quoteDecimals={quoteDecimals} />}
-
-        <section className="workspace" id="swap">
-          <div className="swap-card">
-            <div className="card-head"><div><h2>{mode === 'swap' ? 'Swap assets' : mode === 'deposit' ? 'Add liquidity' : 'Remove liquidity'}</h2><span>Covenant-enforced constant-product pool</span></div>{mode === 'swap' && <button className="icon-button" onClick={() => setShowSettings(!showSettings)} aria-label="Swap settings">⚙</button>}</div>
-            <div className="mode-tabs">{(['swap', 'deposit', 'withdraw'] as const).map((item) => <button key={item} className={mode === item ? 'active' : ''} onClick={() => updateSwapMode(item)}>{item === 'swap' ? 'Swap' : item === 'deposit' ? 'Add' : 'Remove'}</button>)}</div>
-            {mode === 'swap' && <>
-              {showSettings && <div className="settings"><span>Max slippage</span><div>{[10, 50, 100].map((v) => <button className={slippage === v ? 'selected' : ''} key={v} onClick={() => setSlippage(v)}>{v / 100}%</button>)}</div></div>}
-              <div className="asset-box">
-              <div className="asset-top"><label>You pay</label><button className="balance" onClick={setMaxAmount} disabled={swapLocked}>Balance: {balance} <b>MAX</b></button></div>
-              <div className="asset-main">
-                <input value={amount} onChange={(event) => { setQuoteMode('input'); setAmount(event.target.value); setReceiveAmount(''); setQuote(null); setRequest(null); setError('') }} placeholder="0" inputMode="decimal" aria-label="Amount to sell" disabled={swapLocked} />
-                <button className="token-select" onClick={openPairModal}><TokenMark label={sellTicker} /><span>{sellTicker}</span><small>⌄</small></button>
-              </div>
-              <div className="asset-foot"><span>{sellAssetId ? tokenDetails(sellAssetId).name : 'Select a pool'}</span><span>Arkade asset</span></div>
-              </div>
-
-              <div className="switch-row"><span /><button onClick={reverse} disabled={swapLocked} aria-label="Reverse swap direction">↓</button><span /></div>
-
-              <div className="asset-box receive">
-              <div className="asset-top"><label>You receive</label><span>{quoteMode === 'output' ? 'Exact output' : 'Estimated'}</span></div>
-              <div className="asset-main"><input value={receiveAmount} onChange={(event) => { setQuoteMode('output'); setReceiveAmount(event.target.value); setAmount(''); setQuote(null); setRequest(null); setError('') }} placeholder="0" inputMode="decimal" aria-label="Amount to receive" disabled={swapLocked} /><button className="token-select" onClick={openPairModal}><TokenMark label={buyTicker} warm /><span>{buyTicker}</span><small>⌄</small></button></div>
-              <div className="asset-foot"><span>{buyAssetId ? tokenDetails(buyAssetId).name : '—'}</span><span>{quoteMode === 'output' ? `Quoted output: ${quote ? displayAmount(quote.outputAmount, buyDecimals) : '—'}` : `Minimum: ${quote ? displayAmount((BigInt(quote.outputAmount) * BigInt(10_000 - slippage)) / 10_000n, buyDecimals) : '—'}`}</span></div>
-              </div>
-
-              {quote && <div className="route-details">
-              <div><span>Route</span><b>{sellTicker} <i>→</i> {buyTicker}</b></div>
-              <div><span>Total fee</span><b>{(pool!.feeBps / 100).toFixed(2)}%</b></div>
-              <div><span>LP fee</span><b>{((pool!.feeBps - pool!.protocolFeeBps) / 100).toFixed(2)}%</b></div>
-              <div><span>Protocol fee</span><b>{(pool!.protocolFeeBps / 100).toFixed(2)}%</b></div>
-              <div><span>Points earned</span><b className="points-earned">+{comma(quote.rewardPoints ?? '1')} PTS</b></div>
-              {BigInt(quote.carrierFeeSats) > 0n && <div><span>Carrier fee</span><b>{comma(quote.carrierFeeSats)} sats</b></div>}
-              <div><span>Price impact</span><b className={quote.priceImpactBps > 300 ? 'danger' : 'positive'}>{(quote.priceImpactBps / 100).toFixed(2)}%</b></div>
-              <div><span>Slippage protection</span><b>{(slippage / 100).toFixed(2)}%</b></div>
-              </div>}
-
-              <button className="primary" onClick={() => void swap()} disabled={busy || connecting || (walletReady && swapBlocker !== null)}>{busy && <Spinner />}{walletActionLabel ?? swapBlocker ?? 'Review & swap'}</button>
-            </>}
-
-            {mode !== 'swap' && <>
-              <div className="asset-box">
-                <div className="asset-top"><label>{mode === 'deposit' ? 'Base amount to add' : 'LP tokens to burn'}</label><span>Raw-unit exact</span></div>
-                <div className="asset-main">
-                  <input value={liquidityAmount} onChange={(event) => { setLiquidityAmount(event.target.value); setLiquidityRequest(null); setError('') }} placeholder="0" inputMode="decimal" aria-label="Liquidity amount" disabled={liquidityLocked} />
-                  <div className="token-select static"><TokenMark label={mode === 'deposit' ? baseTicker : 'LP'} /><span>{mode === 'deposit' ? baseTicker : 'LP'}</span></div>
-                </div>
-                <div className="asset-foot"><span>{mode === 'deposit' ? `Balance: ${pool?.baseAssetId === 'btc' ? displayAmount(BigInt(btcBalance), 8, 8) : baseAsset ? displayAmount(BigInt(baseAsset.amount), baseDecimals) : '0'}` : `Balance: ${lpAsset ? displayAmount(BigInt(lpAsset.amount), lpDecimals) : '0'}`}</span><span>{mode === 'deposit' ? 'Pool ratio is fixed at funding' : 'Pro-rata redemption'}</span></div>
-              </div>
-              <div className="liquidity-preview">
-                <div><span>{mode === 'deposit' ? 'Required quote' : 'Base received'}</span><b>{liquidityPreview ? displayAmount(mode === 'deposit' ? liquidityPreview.quote : liquidityPreview.base, mode === 'deposit' ? quoteDecimals : baseDecimals) : '—'} {mode === 'deposit' ? quoteTicker : baseTicker}</b></div>
-                <div><span>{mode === 'deposit' ? 'LP received' : 'Quote received'}</span><b>{liquidityPreview ? displayAmount(mode === 'deposit' ? liquidityPreview.lp : liquidityPreview.quote, mode === 'deposit' ? lpDecimals : quoteDecimals) : '—'} {mode === 'deposit' ? 'LP' : quoteTicker}</b></div>
-              </div>
-              <button className="primary" onClick={() => void submitLiquidity()} disabled={busy || connecting || (walletReady && liquidityBlocker !== null)}>{busy && <Spinner />}{walletActionLabel ?? liquidityBlocker ?? (mode === 'deposit' ? 'Fund liquidity deposit' : 'Fund LP withdrawal')}</button>
-            </>}
-            {error && <div className="notice error"><b>Transaction unavailable</b><span>{error}</span></div>}
-            {mode === 'swap' && request && <RequestNotice noun="Swap" request={request} busy={busy} onDismiss={() => setRequest(null)} onRetryRegistration={() => void retryRegistration(`/v1/swaps/${request.id}`, request, setRequest)} />}
-            {mode !== 'swap' && liquidityRequest && <RequestNotice noun="Liquidity request" request={liquidityRequest} busy={busy} onDismiss={() => setLiquidityRequest(null)} onRetryRegistration={() => void retryRegistration(`/v1/liquidity/${liquidityRequest.id}`, liquidityRequest, setLiquidityRequest)} />}
-            {controlledPoolAssets.length > 0 && <div className="notice asset-risk"><b>Controlled asset supply</b><span>{controlledPoolAssets.map((info) => `${info.assetId === pool?.baseAssetId ? baseTicker : quoteTicker}: ${short(info.controlAssetId ?? '', 8)}`).join(' · ')}. Holders of these control assets may authorize additional issuance, which can affect pool value.</span></div>}
-            <p className="security"><span>◇</span> Your wallet funds a covenant-bound request. The coordinator cannot redirect your payout.</p>
-          </div>
-
-          <aside>
-            <div className="panel pool-panel" id="pools">
-              <div className="panel-head"><span>AUTOMATIC ROUTE</span><div className="panel-actions"><button className="share-link" onClick={() => void copySwapLink()}>{linkCopied ? 'Copied' : 'Copy link'}</button><button className="change-pair" onClick={openPairModal}>Change pair</button></div></div>
-               <div className="pair"><div className="marks"><TokenMark label={sellTicker} /><TokenMark label={buyTicker} warm /></div><div><div className="pair-title-row"><h3>{pool?.name ?? 'No pool configured'}</h3>{pool?.lifecycle === 'withdraw-only' && <span className="fire-badge">Legacy · withdraw only</span>}{pool?.onFire && <span className="fire-badge" title={`${pool.activity24h ?? 0} settled operations in the last 24 hours`}>🔥 On fire</span>}</div><p><i className={pool?.available ? 'online' : ''} /> {pool?.available ? 'Pool readable' : 'Unavailable'} · {pool?.feeBps ?? 0} bps{pool?.onFire ? ` · ${pool.activity24h} actions / 24h` : ''}</p></div></div>
-              <div className="pool-stats"><div><span>Base reserve</span><b>{pool?.baseReserve ? comma(pool.baseReserve) : '—'}</b></div><div><span>Quote reserve</span><b>{pool?.quoteReserve ? comma(pool.quoteReserve) : '—'}</b></div><div><span>LP supply</span><b>{pool?.lpSupply ? comma(pool.lpSupply) : '—'}</b></div></div>
-              <div className="pool-foot"><span>{pool?.protocolFeeBps ? 'Covenant fee vault active' : 'LP fees only'}</span>{pool ? <button className="pool-detail-link" onClick={() => openPoolDetail(pool)}>Pool details →</button> : <span>Up to {deployment?.maxSwapBatch ?? 3} swaps / sweep</span>}</div>
-            </div>
-
-            <div className="panel how-panel">
-              <span className="panel-label">HOW IT WORKS</span>
-              <ol><li><b>1</b><div><strong>Fund a standing swap</strong><span>Your assets enter a payout-bound contract.</span></div></li><li><b>2</b><div><strong>Requests are batched</strong><span>Up to {deployment?.maxSwapBatch ?? 3} swaps update the pool atomically.</span></div></li><li><b>3</b><div><strong>Receive automatically</strong><span>The bought asset lands directly in your wallet.</span></div></li></ol>
-              <a className="panel-doc-link" href="https://docs.inscrib3.com/app/swaps" target="_blank" rel="noreferrer">Read the swap guide ↗</a>
-            </div>
-          </aside>
-        </section>
-        </> : page === 'launches' ? <LaunchesPage onOpen={(id) => navigate('launch', id)} onCreate={() => navigate('launch-create')} />
+        {page === 'swap' ? <SwapPage mode={mode} pool={pool} baseTicker={baseTicker} quoteTicker={quoteTicker} baseDecimals={baseDecimals} quoteDecimals={quoteDecimals} buyDecimals={buyDecimals} lpDecimals={lpDecimals} baseAsset={baseAsset} lpAsset={lpAsset} btcBalance={btcBalance} sellTicker={sellTicker} buyTicker={buyTicker} sellAssetId={sellAssetId} buyAssetId={buyAssetId} tokenDetails={tokenDetails} amount={amount} receiveAmount={receiveAmount} quoteMode={quoteMode} quote={quote} balance={balance} slippage={slippage} showSettings={showSettings} swapLocked={swapLocked} liquidityLocked={liquidityLocked} busy={busy} connecting={connecting} walletReady={walletReady} walletActionLabel={walletActionLabel} swapBlocker={swapBlocker} liquidityBlocker={liquidityBlocker} error={error} request={request} liquidityRequest={liquidityRequest} liquidityAmount={liquidityAmount} liquidityPreview={liquidityPreview} controlledPoolAssets={controlledPoolAssets} linkCopied={linkCopied} onFirePool={onFirePool} onFireBase={onFireBase} onFireQuote={onFireQuote} onFireLaunch={onFireLaunch} deployment={deployment} onSwapModeChange={updateSwapMode} onToggleSettings={() => setShowSettings(!showSettings)} onSlippageChange={setSlippage} onMax={setMaxAmount} onAmountChange={(value) => { setQuoteMode('input'); setAmount(value); setReceiveAmount(''); setQuote(null); setRequest(null); setError('') }} onReceiveChange={(value) => { setQuoteMode('output'); setReceiveAmount(value); setAmount(''); setQuote(null); setRequest(null); setError('') }} onOpenPairModal={openPairModal} onReverse={reverse} onSwap={() => void swap()} onSubmitLiquidity={() => void submitLiquidity()} onLiquidityChange={(value) => { setLiquidityAmount(value); setLiquidityRequest(null); setError('') }} onDismissRequest={() => setRequest(null)} onDismissLiquidity={() => setLiquidityRequest(null)} onRetrySwap={() => { if (request) void retryRegistration(`/v1/swaps/${request.id}`, request, setRequest) }} onRetryLiquidity={() => { if (liquidityRequest) void retryRegistration(`/v1/liquidity/${liquidityRequest.id}`, liquidityRequest, setLiquidityRequest) }} onCopyLink={() => void copySwapLink()} onViewPool={openPoolDetail} onSwitchPool={(target) => switchToPool(target)} onViewLaunch={(id) => navigate('launch', id)} /> : page === 'launches' ? <LaunchesPage onOpen={(id) => navigate('launch', id)} onCreate={() => navigate('launch-create')} />
         : page === 'launch' ? <LaunchDetailPage key={launchId} id={launchId} onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
           walletAddress={address} walletBalance={walletBalance} walletBalancesAvailable={true} popupWallet={popupWallet} refreshWallet={refreshAssets} connectWallet={() => void requireWallet()}
           fundContract={fundLaunchContract} identityKey={identityKey} referralCode={referralCode} />
         : page === 'launch-create' ? <CreateLaunchPage onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
           walletAddress={address} popupWallet={popupWallet} connectWallet={() => void requireWallet()} issueAsset={issueLaunchAsset} fundContract={fundLaunchContract}
           onOpened={(id) => navigate('launch', id)} identityKey={identityKey} referralCode={referralCode} />
-        : page === 'pools' ? <section className="view-page">
-          <div className="view-heading"><div><span className="eyebrow"><i /> LIVE LIQUIDITY</span><h1>Pools</h1><p>Current covenant reserves and AMM identifiers.</p></div><button className="secondary" onClick={() => runWithToast(refreshPools)}>Refresh</button></div>
-          <div className="pool-search-row">
-            <label className="search-field"><span aria-hidden="true">⌕</span><input type="search" value={poolSearch} onChange={(event) => updatePoolSearch(event.target.value)} placeholder="Search by pool, ticker or asset ID" aria-label="Search pools" />{poolSearch && <button type="button" onClick={() => updatePoolSearch('')} aria-label="Clear pool search">×</button>}</label>
-            <span>{filteredPools.length} of {poolResultTotal} pools</span>
-          </div>
-          {filteredPools.length === 0 ? <div className="empty-state search-empty">No pools match “{poolSearch.trim()}”.</div> : <div className="pool-grid">{filteredPools.map((item) => {
-            const walletBase = assets.find((asset) => asset.assetId === item.baseAssetId)
-            const walletQuote = assets.find((asset) => asset.assetId === item.quoteAssetId)
-            const itemBaseTicker = item.baseAssetId === 'btc' ? 'BTC' : walletBase?.metadata?.ticker ?? item.baseAssetInfo?.metadata?.ticker ?? 'ASSET'
-            const itemQuoteTicker = item.quoteAssetId === 'btc' ? 'BTC' : walletQuote?.metadata?.ticker ?? item.quoteAssetInfo?.metadata?.ticker ?? 'ASSET'
-            const itemBaseDecimals = item.baseAssetId === 'btc' ? 8 : walletBase?.metadata?.decimals ?? item.baseAssetInfo?.metadata?.decimals ?? 0
-            const itemQuoteDecimals = item.quoteAssetId === 'btc' ? 8 : walletQuote?.metadata?.decimals ?? item.quoteAssetInfo?.metadata?.decimals ?? 0
-            return <article className="pool-card" key={item.id}>
-              <div className="pool-card-title"><div className="marks"><TokenMark label={itemBaseTicker} /><TokenMark label={itemQuoteTicker} warm /></div><div className="pool-title-content"><div className="pool-title-row"><h2>{item.name}</h2>{item.onFire && <span className="fire-badge" title={`${item.activity24h ?? 0} settled operations in the last 24 hours`}>🔥 On fire</span>}</div><span className={item.available ? 'live' : 'offline'}>{item.available ? 'Active' : 'Unavailable'}{item.onFire ? ` · ${item.swaps24h ?? 0} swaps · ${item.liquidityEvents24h ?? 0} liquidity updates / 24h` : ''}</span></div></div>
-              <div className="reserve-list"><div><span>{itemBaseTicker} reserve</span><b>{item.baseReserve ? displayAmount(item.baseReserve, itemBaseDecimals, 8) : '—'} {itemBaseTicker}</b></div><div><span>{itemQuoteTicker} reserve</span><b>{item.quoteReserve ? displayAmount(item.quoteReserve, itemQuoteDecimals, 6) : '—'} {itemQuoteTicker}</b></div><div><span>LP supply</span><b>{item.lpSupply ? displayAmount(item.lpSupply, itemBaseDecimals, 8) : '—'} LP</b></div><div><span>LP / protocol fee</span><b>{((item.feeBps - item.protocolFeeBps) / 100).toFixed(2)}% / {(item.protocolFeeBps / 100).toFixed(2)}%</b></div><div><span>Accrued {itemBaseTicker} fees</span><b>{item.accruedBaseFees ? displayAmount(item.accruedBaseFees, itemBaseDecimals, 8) : '0'} {itemBaseTicker}</b></div><div><span>Accrued {itemQuoteTicker} fees</span><b>{item.accruedQuoteFees ? displayAmount(item.accruedQuoteFees, itemQuoteDecimals, 6) : '0'} {itemQuoteTicker}</b></div></div>
-              <div className="id-list"><div><span>Quote asset</span><code>{short(item.quoteAssetId, 10)}</code></div><div><span>LP asset</span><code>{short(item.lpAssetId, 10)}</code></div></div>
-              {(item.baseAssetInfo?.controlled || item.quoteAssetInfo?.controlled) && <div className="pool-risk"><b>Controlled supply</b><span>{[item.baseAssetInfo, item.quoteAssetInfo].filter((info) => info?.controlled).map((info) => short(info!.controlAssetId ?? '', 8)).join(' · ')}</span></div>}
-              {item.error && <p className="pool-error">{item.error}</p>}
-               <div className="pool-card-actions"><button className="secondary" onClick={() => openPoolDetail(item)}>View details</button><button className="secondary" onClick={() => switchToPool(item, 'push')}>Trade this pool</button></div>
-             </article>
-           })}</div>}
-           {poolCursor && <button className="secondary load-more" onClick={() => runWithToast(loadMorePools)}>Load more pools</button>}
-        </section> : page === 'pool' ? <section className="view-page pool-detail-page">
-          {!pool ? <div className="empty-state">Pool not found.</div> : (() => {
-            const base = tokenDetails(pool.baseAssetId)
-            const quoteToken = tokenDetails(pool.quoteAssetId)
-            const baseReserve = BigInt(pool.baseReserve ?? '0')
-            const quoteReserve = BigInt(pool.quoteReserve ?? '0')
-            const quotePerBase = ratio(quoteReserve * 10n ** BigInt(base.decimals), baseReserve * 10n ** BigInt(quoteToken.decimals))
-            const inverseNumerator = baseReserve * 10n ** BigInt(quoteToken.decimals)
-            const inverseInSats = pool.baseAssetId === 'btc' && inverseNumerator < quoteReserve
-            const basePerQuote = ratio(inverseNumerator, quoteReserve * (inverseInSats ? 1n : 10n ** BigInt(base.decimals)))
-            return <>
-              <div className="pool-detail-hero">
-                <button className="back-link" onClick={() => navigate('pools')}>← All pools</button>
-                <div className="pool-detail-title"><div className="marks"><TokenMark label={base.ticker} /><TokenMark label={quoteToken.ticker} warm /></div><div><span className="eyebrow"><i /> POOL DETAIL</span><div className="pool-title-row"><h1>{pool.name}</h1>{pool.lifecycle === 'withdraw-only' && <span className="fire-badge">Legacy · withdraw only</span>}{pool.onFire && <span className="fire-badge" title={`${pool.activity24h ?? 0} settled operations in the last 24 hours`}>🔥 On fire</span>}</div><p><span className={pool.available ? 'live-dot' : 'offline-dot'} /> {pool.available ? pool.lifecycle : 'Pool unavailable'} · {pool.contractGeneration} · {pool.feeBps} bps total fee</p></div></div>
-                <button className="primary compact" onClick={() => switchToPool(pool, 'push')}>{pool.swapEnabled ? 'Trade this pool' : 'Manage withdrawal'}</button>
-              </div>
-
-              <div className="metric-grid">
-                <div><span>{quoteToken.ticker} per {base.ticker}</span><b>{quotePerBase}</b><small>Spot price from current reserves</small></div>
-                <div><span>{inverseInSats ? 'sats' : base.ticker} per {quoteToken.ticker}</span><b>{basePerQuote}</b><small>{inverseInSats ? 'Marginal spot · settlement uses whole sats' : 'Inverse spot price'}</small></div>
-                <div><span>24h activity</span><b>{pool.activity24h ?? 0}</b><small>{pool.swaps24h ?? 0} swaps · {pool.liquidityEvents24h ?? 0} liquidity</small></div>
-                <div><span>LP supply</span><b>{displayAmount(pool.lpSupply ?? '0', base.decimals, 8)}</b><small>{pool.lpAssetId ? short(pool.lpAssetId, 8) : '—'}</small></div>
-              </div>
-
-              <PriceChart key={`detail-${pool.id}`} pool={pool} baseTicker={base.ticker} quoteTicker={quoteToken.ticker} baseDecimals={base.decimals} quoteDecimals={quoteToken.decimals} />
-
-              <div className="detail-columns">
-                {([{ assetId: pool.baseAssetId, details: base, info: pool.baseAssetInfo, reserve: pool.baseReserve, warm: false }, { assetId: pool.quoteAssetId, details: quoteToken, info: pool.quoteAssetInfo, reserve: pool.quoteReserve, warm: true }] as const).map((token) => <article className="token-detail-card" key={token.assetId}>
-                  <div className="token-detail-head"><TokenMark label={token.details.ticker} warm={token.warm} /><div><h2>{token.details.name}</h2><span>{token.details.ticker}</span></div></div>
-                  <dl><div><dt>Pool reserve</dt><dd>{displayAmount(token.reserve ?? '0', token.details.decimals, 8)} {token.details.ticker}</dd></div>{(token.assetId === 'btc' || token.info?.supply) && <div><dt>Total supply</dt><dd>{token.assetId === 'btc' ? '21,000,000 BTC max' : displayAmount(token.info!.supply!, token.details.decimals, 8)}</dd></div>}<div><dt>Issuance</dt><dd>{token.info?.controlled ? 'Controlled / reissuable' : token.assetId === 'btc' ? 'Native Bitcoin' : 'No control asset'}</dd></div><div><dt>Asset ID</dt><dd><code title={token.assetId}>{short(token.assetId, 10)}</code></dd></div></dl>
-                </article>)}
-              </div>
-
-              <div className="activity-section-heading"><div><span className="eyebrow"><i /> LIVE FEED</span><h2>Pool activity</h2><p>Swap, liquidity additions and removals for this pool.</p></div><button className="secondary" onClick={() => runWithToast(refreshPoolActivity)}>Refresh</button></div>
-              <div className="activity-panel">
-                <div className="activity-head"><span>Type</span><span>Amount</span><span>Status</span><span>Transaction</span></div>
-                {activity.length === 0 ? <div className="empty-state">No activity for this pool yet.</div> : (activity as ActivityEvent[]).map((item) => {
-                  const isSwap = item.activityType === 'swap'
-                  const sold = isSwap && item.sellAssetId ? tokenDetails(item.sellAssetId) : undefined
-                  const amountText = isSwap ? `${displayAmount(item.sellAmount ?? '0', sold?.decimals ?? 0)} ${sold?.ticker ?? 'ASSET'}` : item.activityType === 'deposit' ? `${displayAmount(item.baseAmount, base.decimals)} ${base.ticker} + ${displayAmount(item.quoteAmount, quoteToken.decimals)} ${quoteToken.ticker}` : `${displayAmount(item.lpAmount, base.decimals)} LP`
-                  return <div className="activity-row" key={`${item.activityType}-${item.id}`}><div><span className={`activity-icon ${item.activityType}`}>{isSwap ? '↔' : item.activityType === 'deposit' ? '+' : '−'}</span><div><b>{isSwap ? 'Swap' : item.activityType === 'deposit' ? 'Add liquidity' : 'Remove liquidity'}</b><small>{item.createdAt ? new Date(item.createdAt).toLocaleString() : short(item.id)}</small></div></div><code>{amountText}</code><span className={`status-pill ${item.status}`}>{item.status.replace('-', ' ')}</span><code title={item.settlementTxid ?? item.fundingTxid ?? ''}>{item.settlementTxid || item.fundingTxid ? short(item.settlementTxid ?? item.fundingTxid!, 7) : '—'}</code></div>
-                })}
-              </div>
-              {activityCursor && <button className="secondary load-more" onClick={() => runWithToast(loadMoreActivity)}>Load more activity</button>}
-            </>
-          })()}
-        </section> : page === 'faucet' ? <section className="view-page faucet-page">
-          <div className="faucet-hero">
-            <div className="faucet-orbit" aria-hidden="true"><span>₿</span><i /><i /><i /></div>
-            <div className="faucet-hero-copy"><span className="eyebrow"><i /> MUTINYNET TEST FUNDS</span><h1>Fund your wallet.<br /><em>Start building.</em></h1><p>Get free Mutinynet sats from the official faucet and receive them directly at your connected Arkade address.</p></div>
-            <a className="primary compact faucet-open" href={MUTINYNET_FAUCET_URL} target="_blank" rel="noreferrer">Open official faucet ↗</a>
-          </div>
-          <div className="faucet-layout">
-            <article className="faucet-address-card">
-              <div className="faucet-card-head"><div><span>DESTINATION</span><h2>Your Arkade address</h2></div><span className="faucet-official"><i /> MUTINYNET</span></div>
-              {!address ? <div className="faucet-connect"><p>Connect Inscrib3 Wallet to load the correct Mutinynet destination.</p><button className="secondary" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Connect wallet'}</button></div> : walletOnWrongNetwork ? <div className="notice asset-risk"><b>Wrong wallet network</b><span>Switch Inscrib3 Wallet to Mutinynet before requesting test funds.</span></div> : <>
-                <code className="faucet-address" title={address}>{address}</code>
-                <div className="faucet-address-actions"><button className="secondary" onClick={() => void copyFaucetAddress()}>{faucetCopied ? 'Address copied' : 'Copy address'}</button><a className="primary" href={MUTINYNET_FAUCET_URL} target="_blank" rel="noreferrer">Continue to faucet ↗</a></div>
-              </>}
-              <small>The faucet sends test sats directly to this address. Inscrib3 never receives your faucet credentials or wallet keys.</small>
-            </article>
-            <aside className="faucet-steps">
-              <span className="panel-label">HOW TO FUND</span>
-              <ol><li><b>1</b><div><strong>Copy your address</strong><span>Use the connected <code>tark1…</code> destination shown here.</span></div></li><li><b>2</b><div><strong>Sign in to Mutinynet</strong><span>Authentication is handled by the official faucet through GitHub.</span></div></li><li><b>3</b><div><strong>Select Arkade</strong><span>Paste the address, choose an amount and submit the request.</span></div></li><li><b>4</b><div><strong>Wait for your balance</strong><span>The wallet updates after the Arkade payment settles.</span></div></li></ol>
-              <div className="faucet-limit"><span>Official limit</span><b>1,000,000 sats / 24h</b><small>Applied per IP, user and destination by Mutinynet.</small></div>
-            </aside>
-          </div>
-        </section> : page === 'leaderboard' ? <section className="view-page leaderboard-page">
-          <div className="view-heading"><div><span className="eyebrow"><i /> GLOBAL POINTS</span><h1>Leaderboard</h1><p>Every ranked wallet across pools, swaps, launches and referrals.</p></div><span className="leaderboard-count">{globalLeaderboardTotal} {leaderboardQuery.trim() ? 'matches' : 'players'}</span></div>
-          <div className="leaderboard-toolbar">
-            <label className="search-field"><span aria-hidden="true">⌕</span><input type="search" value={leaderboardQuery} onChange={(event) => updateLeaderboardQuery(event.target.value)} placeholder="Search wallet address or identity key" aria-label="Search leaderboard wallets" autoComplete="off" />{leaderboardQuery && <button type="button" onClick={() => updateLeaderboardQuery('')} aria-label="Clear wallet search">×</button>}</label>
-            <span>Ranks remain global in search results</span>
-          </div>
-          <div className="global-leaderboard">
-            <div className="global-leaderboard-head"><span>Rank</span><span>Wallet</span><span>Pool</span><span>Swap</span><span>Launch</span><span>Referral</span><span>Total</span></div>
-            {globalLeaderboard.map((item) => <div className={`global-leaderboard-row${item.identityKey === points?.identityKey ? ' current' : ''}`} key={item.identityKey}>
-              <b className="leaderboard-rank">#{item.rank}</b><code title={item.address}>{short(item.address, 8)}</code>
-              <span data-label="Pool">{comma(item.poolPoints)}</span><span data-label="Swap">{comma(item.swapPoints)}</span>
-              <span data-label="Launch">{comma((BigInt(item.launchPoints) + BigInt(item.launchTradePoints)).toString())}</span><span data-label="Referral">{comma(item.referralPoints)}</span>
-              <b className="leaderboard-total">{comma(item.total)} PTS</b>
-            </div>)}
-            {!globalLeaderboardLoading && !globalLeaderboardError && globalLeaderboard.length === 0 && <div className="empty-state">{leaderboardQuery.trim() ? `No ranked wallet matches “${leaderboardQuery.trim()}”.` : 'No scores yet.'}</div>}
-            {globalLeaderboardLoading && globalLeaderboard.length === 0 && <div className="empty-state"><Spinner /> Loading leaderboard…</div>}
-            {globalLeaderboardError && <div className="notice error"><b>Leaderboard unavailable</b><span>{globalLeaderboardError}</span></div>}
-          </div>
-          {globalLeaderboardOffset !== undefined && <button className="secondary load-more" disabled={globalLeaderboardLoading} onClick={() => void loadMoreLeaderboard()}>{globalLeaderboardLoading ? 'Loading…' : 'Load more players'}</button>}
-        </section> : page === 'create' ? <section className="view-page create-page">
-          <div className="view-heading"><div><span className="eyebrow"><i /> PERMISSIONLESS ASSETS</span><h1>Create</h1><p>Issue an Arkade asset or open a covenant-enforced liquidity pool from your own wallet.</p></div></div>
-          <div className="create-tabs"><button className={createMode === 'asset' ? 'active' : ''} onClick={() => updateCreateMode('asset')}>Create asset</button><button className={createMode === 'pool' ? 'active' : ''} onClick={() => updateCreateMode('pool')}>Create pool</button></div>
-          {createMode === 'asset' ? <div className="create-layout">
-            <article className="create-card">
-              <div className="card-head"><div><h2>Issue a new asset</h2><span>Non-custodial issuance through Inscrib3 Wallet</span></div></div>
-              <div className="form-grid">
-                <label><span>Name</span><input value={assetForm.name} onChange={(e) => setAssetForm({ ...assetForm, name: e.target.value })} placeholder="My Arkade Asset" /><FieldError message={assetValidation.errors.name} value={assetForm.name} /></label>
-                <label><span>Ticker</span><input value={assetForm.ticker} onChange={(e) => setAssetForm({ ...assetForm, ticker: e.target.value.toUpperCase() })} placeholder="ASSET" maxLength={16} /><FieldError message={assetValidation.errors.ticker} value={assetForm.ticker} /></label>
-                <label><span>Initial supply</span><input value={assetForm.supply} onChange={(e) => setAssetForm({ ...assetForm, supply: e.target.value })} placeholder="1000000" inputMode="decimal" /><FieldError message={assetValidation.errors.supply} value={assetForm.supply} /></label>
-                <label><span>Decimals</span><input value={assetForm.decimals} onChange={(e) => setAssetForm({ ...assetForm, decimals: e.target.value })} placeholder="0" inputMode="numeric" /><FieldError message={assetValidation.errors.decimals} value={assetForm.decimals} /></label>
-                <label className="wide"><span>Icon URL <small>optional</small></span><input value={assetForm.icon} onChange={(e) => setAssetForm({ ...assetForm, icon: e.target.value })} placeholder="https://…" /><FieldError message={assetValidation.errors.icon} value={assetForm.icon} /></label>
-              </div>
-              <button className="primary" disabled={busy || connecting || (walletReady && assetFormBlocker !== null)} onClick={() => void createAsset()}>{busy && <Spinner />}{walletActionLabel ?? assetFormBlocker ?? 'Review asset issuance'}</button>
-              {creationStep && <div className="creation-progress"><i className={issuedAsset ? 'done' : ''} /><span>{creationStep}</span></div>}
-              {issuedAsset && <div className="result-box"><span>Asset ID</span><code>{issuedAsset.assetId}</code><span>Issuance transaction</span><code>{issuedAsset.arkTxId}</code></div>}
-            </article>
-            <aside className="create-info"><span className="panel-label">WHAT HAPPENS</span><h3>Your keys issue the asset</h3><p>The wallet shows an approval before signing. Supply and metadata are submitted directly to Arkade; the AMM backend never receives your keys or assets.</p><ul><li>Raw amounts stay integer-exact</li><li>Metadata is immutable for this issuance</li><li>The asset appears in Inscrib3 Wallet</li></ul></aside>
-          </div> : <div className="create-layout">
-            <article className="create-card pool-create-card">
-              <div className="card-head"><div><h2>Open a liquidity pool</h2><span>Default fee: 0.70% LP + 0.30% protocol</span></div></div>
-              <div className="form-grid">
-                <label><span>Pool slug <small>derived from tickers</small></span><input value={poolForm.id} placeholder="Select both assets" readOnly /></label>
-                <label><span>Display name <small>derived from the pair</small></span><input value={poolForm.name} placeholder="Select both assets" readOnly /></label>
-                <label><span>Base asset</span><select value={poolForm.baseAssetId} onChange={(e) => updatePoolPair(e.target.value, poolForm.quoteAssetId)}><option value="btc">BTC · native</option>{assets.map((item) => <option key={item.assetId} value={item.assetId}>{item.metadata?.ticker ?? short(item.assetId)}</option>)}</select></label>
-                <label><span>Quote asset</span><select value={poolForm.quoteAssetId} onChange={(e) => updatePoolPair(poolForm.baseAssetId, e.target.value)}><option value="">Select asset</option>{assets.filter((item) => item.assetId !== poolForm.baseAssetId).map((item) => <option key={item.assetId} value={item.assetId}>{item.metadata?.ticker ?? short(item.assetId)}</option>)}</select><FieldError message={poolValidation.errors.quoteAssetId} value={poolForm.quoteAssetId} /></label>
-                <label><span>Initial base reserve <small>{creationBaseDetails ? `${creationBaseDetails.ticker} display units · ${creationBaseDetails.decimals} decimals` : 'select an asset'}</small></span><input value={poolForm.baseAmount} onChange={(e) => setPoolForm({ ...poolForm, baseAmount: e.target.value })} placeholder={poolForm.baseAssetId === 'btc' ? '0.002' : '100'} inputMode="decimal" /><FieldError message={poolValidation.errors.baseAmount} value={poolForm.baseAmount} /></label>
-                <label><span>Initial quote reserve <small>{creationQuoteDetails ? `${creationQuoteDetails.ticker} display units · ${creationQuoteDetails.decimals} decimals` : 'select an asset'}</small></span><input value={poolForm.quoteAmount} onChange={(e) => setPoolForm({ ...poolForm, quoteAmount: e.target.value })} placeholder="100" inputMode="decimal" /><FieldError message={poolValidation.errors.quoteAmount} value={poolForm.quoteAmount} /></label>
-                <label><span>Total fee · bps</span><input value={poolForm.feeBps} onChange={(e) => setPoolForm({ ...poolForm, feeBps: e.target.value })} inputMode="numeric" /><FieldError message={poolValidation.errors.feeBps} value={poolForm.feeBps} /></label>
-                <label><span>Protocol fee · min {MIN_PROTOCOL_FEE_BPS} bps</span><input value={poolForm.protocolFeeBps} onChange={(e) => setPoolForm({ ...poolForm, protocolFeeBps: e.target.value })} inputMode="numeric" /><FieldError message={poolValidation.errors.protocolFeeBps} value={poolForm.protocolFeeBps} /></label>
-              </div>
-              <div className="fee-summary">
-                <div><span>Initial liquidity</span><b title={initialLiquiditySummary}>{initialLiquiditySummary}</b></div>
-                <div><span>Raw amounts sent to API</span><b title={creationBaseAmount && creationQuoteAmount ? `${creationBaseAmount} / ${creationQuoteAmount}` : undefined}>{creationBaseAmount && creationQuoteAmount ? `${comma(creationBaseAmount)} / ${comma(creationQuoteAmount)}` : 'Converted automatically'}</b></div>
-                <div><span>Creation fee · included</span><b>{deployment ? `${comma(deployment.poolCreationFeeSats)} sats` : 'Unavailable'}</b></div>
-                <div><span>Technical carriers</span><b>{bootstrapSummary ? `${comma(bootstrapSummary.carrierSats)} sats` : 'Calculated by API'}</b></div>
-                <div><span>Total bootstrap funding</span><b title={bootstrapSummary?.total}>{bootstrapSummary?.total ?? 'Returned before payment'}</b></div>
-                <div><span>Stable Treasury Vault</span><code title={deployment?.platformTreasuryAddress}>{deployment ? short(deployment.platformTreasuryAddress, 8) : 'Unavailable'}</code></div>
-              </div>
-              {currentPoolEligibility && !currentPoolEligibility.eligible && <div className="notice launch-pool-block"><b>Launch asset · generic pool blocked</b><span>{currentPoolEligibility.reason}. Launch assets trade only through their bonding curve and canonical permanent pool in Inscrib3.</span></div>}
-              {controlledCreationAssets.length > 0 && <div className="notice asset-risk"><b>Reissuable asset warning</b><span>{controlledCreationAssets.map((asset) => `${asset.metadata?.ticker ?? short(asset.assetId)} · control ${short(asset.controlAssetId!, 8)}`).join(' · ')}. Additional supply may be issued by the control holder.</span></div>}
-              <button className="primary" disabled={busy || connecting || (walletReady && poolFormBlocker !== null)} onClick={() => void createPool()}>{busy && <Spinner />}{walletActionLabel ?? poolFormBlocker ?? (poolAssetIssuance ? 'Resume pool creation' : 'Issue pool assets & open pool')}</button>
-              {creationStep && <div className="creation-progress"><i className={poolCreation?.status === 'opened' ? 'done' : ''} /><span>{creationStep}</span></div>}
-              {poolOpeningPending && <button className="secondary" disabled={busy} onClick={() => void retryPoolOpening()}>Retry opening</button>}
-              {poolCreation && <div className="result-box"><span>Status</span><b>{poolCreation.status}</b>{poolCreation.status === 'opened' && <><span>Points earned</span><b className="points-earned">+10 PTS</b></>}<span>Bootstrap covenant</span><code>{poolCreation.bootstrapAddress}</code>{poolCreation.openingTxid && <><span>Opening transaction</span><code>{poolCreation.openingTxid}</code></>}</div>}
-            </article>
-            <aside className="create-info"><span className="panel-label">ONE ATOMIC FUNDING</span><h3>Permissionless, not custodial</h3><p>Inscrib3 issues the control, LP, and ledger assets, then funds liquidity, technical carriers, and the fixed creation fee in one bootstrap payment. The contract opens and distributes everything atomically.</p><ul><li>BTC remains native and unwrapped</li><li>The creation fee reaches the stable Treasury Vault</li><li>Protocol fee is at least 0.30% and below the total fee</li></ul><a className="panel-doc-link" href="https://docs.inscrib3.com/app/pools-liquidity" target="_blank" rel="noreferrer">Pool and liquidity guide ↗</a></aside>
-          </div>}
-          {error && <div className="notice error create-error"><b>Creation unavailable</b><span>{error}</span></div>}
-        </section> : <section className="view-page">
-          <div className="view-heading"><div><span className="eyebrow"><i /> WALLET HISTORY</span><h1>My activity</h1><p>Your portable score and wallet-signed pool and launch activity.</p></div>{address && <button className="secondary" onClick={() => runWithToast(() => Promise.all([refreshWalletActivity(), refreshPoints()]))}>Refresh</button>}</div>
-          {!address ? <div className="empty-state activity-connect-state"><div className="activity-connect-icon">◇</div><h2>Connect your wallet</h2><p>Connect Inscrib3 Wallet to view your score and activity across pools and launches.</p><button className="secondary" onClick={() => void connect()} disabled={connecting}>{connecting ? 'Connecting…' : 'Connect wallet'}</button></div> : <>
-          <div className="points-dashboard">
-            <section className="points-score-card"><span>YOUR SCORE</span><div><b>{points ? comma(points.total) : '—'}</b><em>PTS</em></div><p>{points?.rank ? `Rank #${points.rank} of ${points.participants}` : 'Complete an eligible action to enter the ranking'}</p><small>Mutinynet points will migrate to Mainnet with the same wallet identity.</small><a href="https://docs.inscrib3.com/app/points" target="_blank" rel="noreferrer">Migration details ↗</a></section>
-            <section className="points-breakdown"><div><span>POOL CREATION</span><b>{points ? comma(points.poolPoints) : '—'}</b><small>10 points per opened pool</small></div><div><span>SWAPS</span><b>{points ? comma(points.swapPoints) : '—'}</b><small>Minimum 1 · protocol fee sats</small></div><div><span>LAUNCH CREATION</span><b>{points ? comma(points.launchPoints) : '—'}</b><small>10 points per opened launch</small></div><div><span>LAUNCH TRADES</span><b>{points ? comma(points.launchTradePoints) : '—'}</b><small>Minimum 1 · protocol fee sats</small></div></section>
-            <section className="referral-card"><div><span>REFERRALS</span><b>{points ? comma(points.referralPoints) : '—'} PTS</b><small>{points?.referredUsers ?? 0} referred wallets · +1 per opened pool, launch, or settled trade</small></div>{points && <><code>{`${window.location.origin}/?ref=${points.referralCode}`}</code><div><button onClick={() => window.open(`https://x.com/intent/post?text=${encodeURIComponent(`Try Inscrib3 App on Mutinynet and earn portable points: ${window.location.origin}/?ref=${points.referralCode}`)}`, '_blank', 'noopener,noreferrer')}>Share on X</button><button onClick={() => { void navigator.clipboard.writeText(`${window.location.origin}/?ref=${points.referralCode}`); window.open('https://discord.com/channels/@me', '_blank', 'noopener,noreferrer') }}>Copy for Discord</button></div></>}</section>
-            <section className="points-leaderboard"><div className="points-board-head"><span>TOP PLAYERS</span><button onClick={() => navigate('leaderboard')}>View all →</button></div>{leaderboard.length ? leaderboard.map((item) => <div className={item.identityKey === points?.identityKey ? 'current' : ''} key={item.identityKey}><i>#{item.rank}</i><code>{short(item.address, 5)}</code><b>{comma(item.total)} PTS</b></div>) : <p>No scores yet.</p>}</section>
-          </div>
-          <div className="activity-panel">
-            <div className="activity-head"><span>Type</span><span>Amount</span><span>Status</span><span>Transaction</span></div>
-            {activity.length === 0 ? <div className="empty-state">No activity for this wallet yet.</div> : activity.map((item) => {
-              if (item.activityType === 'launch-trade') return <div className="activity-row" key={`launch-trade-${item.id}`}>
-                <div><span className="activity-icon launch-trade">↗</span><div><b>{item.side === 'buy' ? 'Launch buy' : 'Launch sell'}</b><small>{item.launchId} · {item.venue} · {new Date(item.createdAt).toLocaleString()} · +{comma(item.rewardPoints)} PTS</small></div></div>
-                <code>{comma(item.inputAmount)} {item.side === 'buy' ? 'sats' : 'raw units'}</code><span className={`status-pill ${item.status}`}>{item.status.replace('-', ' ')}</span>
-                <code title={item.settlementTxid ?? item.fundingTxid ?? ''}>{item.settlementTxid || item.fundingTxid ? short(item.settlementTxid ?? item.fundingTxid!, 7) : '—'}</code>
-              </div>
-              const isSwap = item.activityType === 'swap'
-              const sold = item.activityType === 'swap' && item.sellAssetId ? tokenDetails(item.sellAssetId) : undefined
-              const activityPool = pools.find((candidate) => candidate.id === item.poolId)
-              const activityBase = activityPool ? tokenDetails(activityPool.baseAssetId) : undefined
-              const activityQuote = activityPool ? tokenDetails(activityPool.quoteAssetId) : undefined
-              const amountText = isSwap
-                ? `${displayAmount(item.sellAmount ?? '0', sold?.decimals ?? 0)} ${sold?.ticker ?? 'ASSET'}`
-                : item.activityType === 'deposit'
-                  ? `${displayAmount(item.baseAmount, activityBase?.decimals ?? 0)} ${activityBase?.ticker ?? 'BASE'} + ${displayAmount(item.quoteAmount, activityQuote?.decimals ?? 0)} ${activityQuote?.ticker ?? 'QUOTE'}`
-                  : `${displayAmount(item.lpAmount, activityBase?.decimals ?? 0)} LP`
-              return <div className="activity-row" key={`${item.activityType}-${item.id}`}>
-                <div><span className={`activity-icon ${item.activityType}`}>{item.activityType === 'swap' ? '↔' : item.activityType === 'deposit' ? '+' : '−'}</span><div><b>{item.activityType === 'swap' ? 'Swap' : item.activityType === 'deposit' ? 'Add liquidity' : 'Remove liquidity'}</b><small>{activityPool?.name ?? item.poolId} · {item.createdAt ? new Date(item.createdAt).toLocaleString() : short(item.id)}</small></div></div>
-                <code>{amountText}</code><span className={`status-pill ${item.status}`}>{item.status.replace('-', ' ')}</span>
-                <code title={item.settlementTxid ?? item.fundingTxid ?? ''}>{item.settlementTxid || item.fundingTxid ? short(item.settlementTxid ?? item.fundingTxid!, 7) : '—'}</code>
-              </div>
-            })}
-          </div></>}
-          {activityCursor && <button className="secondary load-more" onClick={() => runWithToast(loadMoreActivity)}>Load more activity</button>}
-        </section>}
+        : page === 'pools' ? <PoolsPage query={poolSearch} updateQuery={updatePoolSearch} pools={filteredPools} total={poolResultTotal} assets={assets} onView={openPoolDetail} onTrade={(item) => switchToPool(item, 'push')} hasMore={Boolean(poolCursor)} onRefresh={() => runWithToast(refreshPools)} onLoadMore={() => runWithToast(loadMorePools)} /> : page === 'pool' ? <PoolDetailPage pool={pool} onBack={() => navigate('pools')} onTrade={(target) => switchToPool(target, 'push')} tokenDetails={tokenDetails} activity={activity as ActivityEvent[]} hasMore={Boolean(activityCursor)} onRefresh={() => runWithToast(refreshPoolActivity)} onLoadMore={() => runWithToast(loadMoreActivity)} />
+        : page === 'faucet' ? <FaucetPage address={address} walletOnWrongNetwork={walletOnWrongNetwork} connecting={connecting} connect={() => void connect()} copyFaucetAddress={copyFaucetAddress} faucetCopied={faucetCopied} /> : page === 'leaderboard' ? <LeaderboardPage entries={globalLeaderboard} total={globalLeaderboardTotal} loading={globalLeaderboardLoading} error={globalLeaderboardError} hasMore={globalLeaderboardOffset !== undefined} query={leaderboardQuery} updateQuery={updateLeaderboardQuery} loadMore={() => void loadMoreLeaderboard()} identityKey={points?.identityKey} /> : page === 'create' ? <CreatePage createMode={createMode} onSelectMode={updateCreateMode} busy={busy} connecting={connecting} walletReady={walletReady} walletActionLabel={walletActionLabel} error={error} assetForm={assetForm} onAssetFormChange={setAssetForm} assetValidation={assetValidation} assetFormBlocker={assetFormBlocker} createAsset={() => void createAsset()} creationStep={creationStep} issuedAsset={issuedAsset} poolForm={poolForm} onPoolFormChange={setPoolForm} updatePoolPair={updatePoolPair} assets={assets} poolValidation={poolValidation} creationBaseDetails={creationBaseDetails} creationQuoteDetails={creationQuoteDetails} creationBaseAmount={creationBaseAmount} creationQuoteAmount={creationQuoteAmount} initialLiquiditySummary={initialLiquiditySummary} deployment={deployment} bootstrapSummary={bootstrapSummary} currentPoolEligibility={currentPoolEligibility} controlledCreationAssets={controlledCreationAssets} poolFormBlocker={poolFormBlocker} poolAssetIssuance={poolAssetIssuance} poolCreation={poolCreation} poolOpeningPending={poolOpeningPending} createPool={() => void createPool()} retryPoolOpening={() => void retryPoolOpening()} />
+        : <ActivityPage address={address} connecting={connecting} connect={() => void connect()} onRefresh={() => runWithToast(() => Promise.all([refreshWalletActivity(), refreshPoints()]))} points={points} leaderboard={leaderboard} onViewLeaderboard={() => navigate('leaderboard')} activity={activity} hasMore={Boolean(activityCursor)} onLoadMore={() => runWithToast(loadMoreActivity)} tokenDetails={tokenDetails} pools={pools} />}
       </main>
 
       {showPairModal && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setShowPairModal(false) }}>
