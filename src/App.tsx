@@ -18,6 +18,7 @@ import { PoolDetailPage } from './pages/PoolDetailPage'
 import { PoolsPage } from './pages/PoolsPage'
 import { SwapPage } from './pages/SwapPage'
 import type { ActivityEvent, AssetInfo, AssetRisk, BalanceInfo, CatalogAsset, CursorPage, DeploymentInfo, IssueAssetInput, IssueAssetResult, LeaderboardEntry, LeaderboardPage as LeaderboardResult, LiquidityRequest, NetworkInfo, Page, PageResult, PointsSummary, Pool, PoolAssetIssuance, PoolCreation, PoolEligibility, Quote, SwapRequest, WalletActivityEvent } from './types'
+import { useAutomaticLanguage } from './localization'
 
 const NETWORK = import.meta.env.VITE_NETWORK ?? 'mutinynet'
 if (NETWORK !== 'mutinynet' && NETWORK !== 'mainnet') throw new Error('VITE_NETWORK must be mutinynet or mainnet')
@@ -170,6 +171,8 @@ async function restoreFundedPoolCreation(saved: SavedPayment | undefined): Promi
 }
 
 function App() {
+  useAutomaticLanguage()
+
   const initialRoute = routeFromLocation()
   const initialParams = new URLSearchParams(window.location.search)
   const [referralCode] = useState(() => {
