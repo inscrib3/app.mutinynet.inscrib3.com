@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { decimalRatio, depositFundingSats, DUST_SATS, maxBigInt, minimumSwapOutput, previewLiquidity, swapFundingSats } from './math.ts'
+import { decimalRatio, depositFundingSats, DUST_SATS, exactOutputSellAmount, maxBigInt, minimumSwapOutput, poolBootstrapSats, previewLiquidity, swapFundingSats } from './math.ts'
 
 test('minimumSwapOutput applies slippage and rounds down, reaching zero for dust outputs', () => {
   assert.equal(minimumSwapOutput(10_000n, 50), 9_950n)
@@ -52,4 +52,15 @@ test('depositFundingSats includes dust plus the base reserve only when native', 
 test('maxBigInt picks the larger value', () => {
   assert.equal(maxBigInt(1n, 2n), 2n)
   assert.equal(maxBigInt(-5n, -10n), -5n)
+})
+
+test('poolBootstrapSats matches the API bootstrap for both pool kinds', () => {
+  assert.equal(poolBootstrapSats('btc', 100_000n, 10_000n), 110_990n)
+  assert.equal(poolBootstrapSats('asset', 100_000n, 10_000n), 20_990n)
+})
+
+test('exactOutputSellAmount adds slippage to the input and rounds up', () => {
+  assert.equal(exactOutputSellAmount(10_000n, 50), 10_050n)
+  assert.equal(exactOutputSellAmount(1n, 50), 2n)
+  assert.equal(exactOutputSellAmount(1_000n, 0), 1_000n)
 })

@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api } from './api'
-import { parseDisplayAmount } from './form-validation'
+import { numericText, parseDisplayAmount } from './form-validation'
 import { btc, comma, displayAmount, editableAmount, short, type PriceTimeframe } from './format'
 import { DUST_SATS, decimalRatio } from './math'
 import { PriceChart, type ChartPoint } from './PriceChart'
+import type { SignRefund } from './types'
 
 export type LaunchPhase = 'preparing' | 'curve' | 'graduating' | 'pool' | 'rescued' | 'failed'
 export type LaunchSort = 'newest' | 'graduating' | 'trending'
+// curve-v2 burns tokens above the price-matched pool reserve at graduation.
+export type CurveGeneration = 'curve-v1' | 'curve-v2'
 
 export interface Launch {
   id: string
@@ -19,7 +22,7 @@ export interface Launch {
   assetId?: string
   curveAddress?: string
   poolId?: string
-  protocolGeneration: 'curve-v1'
+  protocolGeneration: CurveGeneration
   poolGeneration: 'launch-amm-v1'
   phase: LaunchPhase
   decimals: number
@@ -38,12 +41,13 @@ export interface Launch {
 
 interface Page<T> { items: T[]; total: number; nextCursor?: string }
 interface Simulation {
-  protocolGeneration: 'curve-v1'
+  protocolGeneration: CurveGeneration
   supply: string
   virtualBtc: string
   graduationThreshold: string
   reservedTokens: string
   sellableTokens: string
+  poolTokensAtGraduation: string
   creatorFeeBps: number
   protocolFeeBps: number
   quote?: { outputAmount: string; spentAmount: string; refundAmount: string; creatorFee: string; protocolFee: string; next: { realBtcReserve: string; tokenReserve: string }; graduates: boolean }
@@ -134,9 +138,9 @@ export function LaunchesPage({ onOpen, onCreate }: { onOpen: (id: string) => voi
   </section>
 }
 
-export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, walletBalance, walletBalancesAvailable, popupWallet, refreshWallet, connectWallet, fundContract, identityKey, referralCode }: {
+export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, walletBalance, walletBalancesAvailable, popupWallet, refreshWallet, connectWallet, fundContract, signRefund, identityKey, referralCode }: {
   id: string; onBack: () => void; tradingEnabled: boolean; walletAddress: string; walletBalance: (assetId: string) => bigint; walletBalancesAvailable: boolean; popupWallet: boolean; refreshWallet: () => Promise<void>;
-  connectWallet: () => void; fundContract: FundContract; identityKey: string; referralCode?: string
+  connectWallet: () => void; fundContract: FundContract; signRefund: SignRefund; identityKey: string; referralCode?: string
 }) {
   const [launch, setLaunch] = useState<Launch | null>(null); const [trades, setTrades] = useState<LaunchTrade[]>([]); const [error, setError] = useState('')
   const [side, setSide] = useState<'buy' | 'sell'>('buy'); const [amount, setAmount] = useState(''); const [quote, setQuote] = useState<LaunchQuoteResponse | null>(null); const [quoteBusy, setQuoteBusy] = useState(false); const [quoteError, setQuoteError] = useState('')
@@ -191,7 +195,10 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, wa
   }
   async function refundTrade() {
     if (!tradeRequest) return; setTradeBusy(true); setError('')
-    try { applyTradeRequest(await api<LaunchRequest>(`/v1/launch-requests/${tradeRequest.id}/refund`, { method: 'POST' })) }
+    try {
+      const proof = await signRefund('launch-request', tradeRequest.id)
+      applyTradeRequest(await api<LaunchRequest>(`/v1/launch-requests/${tradeRequest.id}/refund`, { method: 'POST', body: JSON.stringify({ proof }) }))
+    }
     catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)) } finally { setTradeBusy(false) }
   }
   if (error && !launch) return <section className="view-page"><button className="back-link" onClick={onBack}>← All launches</button><div className="notice error"><b>Launch unavailable</b><span>{error}</span></div></section>
@@ -223,7 +230,7 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, wa
     <div className="launch-detail-hero"><button className="back-link" onClick={onBack}>← All launches</button><div className="launch-detail-title"><LaunchMark launch={launch} /><div><span className="eyebrow"><i /> {launch.protocolGeneration ?? 'CURVE-V1'}</span><h1>{launch.name}</h1><p>${launch.ticker} · created by <code>{short(launch.creatorAddress, 8)}</code></p></div></div><div className="launch-card-badges">{launch.onFire && <span className="fire-badge" title={`${launch.trades24h} settled trades in the last 24 hours`}>🔥 On fire</span>}<PhasePill phase={launch.phase} /></div></div>
     <div className="metric-grid"><div><span>Graduation</span><b>{(launch.progressBps / 100).toFixed(2)}%</b><small>{btc(launch.realBtcReserve)} of {btc(launch.economics.graduationThreshold)}</small></div><div><span>Available on curve</span><b>{displayAmount(launch.sellableTokens, launch.decimals, 8)}</b><small>{launch.ticker} · {launch.decimals} decimals</small></div><div><span>Activity · 24h</span><b>{btc(launch.volumeBtc24h)}</b><small>{launch.trades24h.toLocaleString()} settled trades</small></div><div><span>Total fee</span><b>{((launch.economics.creatorFeeBps + launch.economics.protocolFeeBps) / 100).toFixed(2)}%</b><small>{launch.economics.creatorFeeBps / 100}% creator · {launch.economics.protocolFeeBps / 100}% protocol</small></div></div>
     <LaunchPriceChart launch={launch} />
-    <div className="launch-detail-grid"><article className="token-detail-card"><div className="token-detail-head"><LaunchMark launch={launch} /><div><h2>Launch terms</h2><span>Immutable economics snapshot</span></div></div><dl><div><dt>Total supply</dt><dd>{displayAmount(launch.economics.supply, launch.decimals, 8)} {launch.ticker}</dd></div><div><dt>Reserved for pool</dt><dd>{displayAmount(launch.economics.reservedTokens, launch.decimals, 8)} {launch.ticker}</dd></div><div><dt>Virtual BTC</dt><dd>{btc(launch.economics.virtualBtc)}</dd></div><div><dt>Asset ID</dt><dd><code>{launch.assetId ? short(launch.assetId, 10) : 'Preparing'}</code></dd></div><div><dt>Protocol</dt><dd><code>{launch.protocolGeneration}</code></dd></div></dl></article>
+    <div className="launch-detail-grid"><article className="token-detail-card"><div className="token-detail-head"><LaunchMark launch={launch} /><div><h2>Launch terms</h2><span>Immutable economics snapshot</span></div></div><dl><div><dt>Total supply</dt><dd>{displayAmount(launch.economics.supply, launch.decimals, 8)} {launch.ticker}</dd></div><div><dt>{launch.protocolGeneration === 'curve-v1' ? 'Reserved for pool' : 'Curve floor'}</dt><dd>{displayAmount(launch.economics.reservedTokens, launch.decimals, 8)} {launch.ticker}</dd></div><div><dt>Graduation</dt><dd>{launch.protocolGeneration === 'curve-v1' ? 'All reserved tokens seed the pool' : 'Pool opens at the final curve price; the rest of the floor is burned'}</dd></div><div><dt>Virtual BTC</dt><dd>{btc(launch.economics.virtualBtc)}</dd></div><div><dt>Asset ID</dt><dd><code>{launch.assetId ? short(launch.assetId, 10) : 'Preparing'}</code></dd></div><div><dt>Protocol</dt><dd><code>{launch.protocolGeneration}</code></dd></div></dl></article>
       <article className="launch-trade-card">
         <span className="panel-label">{curveOpen ? 'CURVE TRADE' : launch.phase === 'pool' ? 'PERMANENT POOL TRADE' : 'LAUNCH STATUS'}</span>
         <h2>{curveOpen || launch.phase === 'pool' ? `Trade ${launch.ticker}` : 'Trading is not open'}</h2>
@@ -232,7 +239,7 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, wa
           <div className="launch-side-tabs"><button className={side === 'buy' ? 'active' : ''} onClick={() => { setSide('buy'); clearTradeForm() }}>Buy</button><button className={side === 'sell' ? 'active' : ''} onClick={() => { setSide('sell'); clearTradeForm() }}>Sell</button></div>
           <div className="launch-swap-box">
             <div className="launch-swap-top"><span>You pay</span><button type="button" onClick={setMax} disabled={!walletAddress || !walletBalancesAvailable || tradeInProgress}>Balance: {walletAddress && walletBalancesAvailable ? displayAmount(inputBalance, inputDecimals, 8) : '—'} {walletBalancesAvailable && <b>MAX</b>}</button></div>
-            <div className="launch-swap-main"><input value={amount} onChange={(event) => { setAmount(event.target.value); setQuote(null); setQuoteError(''); setQuoteBusy(false); setError('') }} inputMode="decimal" placeholder="0" disabled={tradeInProgress} aria-label={`Amount of ${inputTicker} to pay`} /><span className="launch-token"><i>{inputTicker.slice(0, 1)}</i>{inputTicker}</span></div>
+            <div className="launch-swap-main"><input value={amount} onChange={(event) => { setAmount(numericText(event.target.value, true)); setQuote(null); setQuoteError(''); setQuoteBusy(false); setError('') }} inputMode="decimal" placeholder="0" disabled={tradeInProgress} aria-label={`Amount of ${inputTicker} to pay`} /><span className="launch-token"><i>{inputTicker.slice(0, 1)}</i>{inputTicker}</span></div>
             <small>{side === 'buy' ? 'BTC display units · 8 decimals' : `${launch.name} · ${launch.decimals} decimals`}</small>
           </div>
           <div className="launch-swap-arrow">↓</div>
@@ -258,6 +265,8 @@ export function LaunchDetailPage({ id, onBack, tradingEnabled, walletAddress, wa
 
 // Fields the curve simulation depends on; editing one makes the shown simulation stale.
 const SIMULATED_FIELDS: Array<keyof typeof DEFAULT_FORM> = ['supply', 'virtualBtc', 'graduationThreshold', 'creatorFeeBps', 'protocolFeeBps', 'buyAmount']
+// Raw integers: sats, bps, token units and decimals.
+const INTEGER_FIELDS: Array<keyof typeof DEFAULT_FORM> = [...SIMULATED_FIELDS, 'decimals']
 const DEFAULT_FORM = { id: '', name: '', ticker: '', description: '', supply: '1000000000', decimals: '0', virtualBtc: '1000000', graduationThreshold: '9000000', creatorFeeBps: '70', protocolFeeBps: '30', buyAmount: '100000' }
 
 export function CreateLaunchPage({ onBack, tradingEnabled, walletAddress, connectWallet, issueAsset, fundContract, onOpened, identityKey, referralCode }: {
@@ -268,7 +277,7 @@ export function CreateLaunchPage({ onBack, tradingEnabled, walletAddress, connec
   const [form, setForm] = useState(DEFAULT_FORM); const [simulation, setSimulation] = useState<Simulation | null>(null); const [error, setError] = useState(''); const [busy, setBusy] = useState(false); const [progress, setProgress] = useState('')
   const [simulating, setSimulating] = useState(false)
   const field = (key: keyof typeof form) => (event: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
-    setForm({ ...form, [key]: event.target.value })
+    setForm({ ...form, [key]: INTEGER_FIELDS.includes(key) ? numericText(event.target.value, false) : event.target.value })
     if (SIMULATED_FIELDS.includes(key)) setSimulation(null)
   }
   async function simulate() {
@@ -309,11 +318,11 @@ export function CreateLaunchPage({ onBack, tradingEnabled, walletAddress, connec
     finally { setBusy(false) }
   }
   return <section className="view-page create-launch-page">
-    <div className="view-heading"><div><span className="eyebrow"><i /> CURVE-V1</span><h1>Create launch</h1><p>Model fixed-supply curve economics before any wallet transaction exists.</p></div><button className="secondary" onClick={onBack}>Back to launches</button></div>
+    <div className="view-heading"><div><span className="eyebrow"><i /> {(simulation?.protocolGeneration ?? 'curve').toUpperCase()}</span><h1>Create launch</h1><p>Model fixed-supply curve economics before any wallet transaction exists.</p></div><button className="secondary" onClick={onBack}>Back to launches</button></div>
     <div className="create-layout"><article className="create-card"><div className="card-head"><div><h2>Launch configuration</h2><span>All monetary fields below are integer raw units or satoshis</span></div></div>
       <div className="form-grid"><label><span>Launch ID</span><input value={form.id} onChange={field('id')} placeholder="my-bitcoin-asset" /></label><label><span>Name</span><input value={form.name} onChange={field('name')} placeholder="My Bitcoin Asset" /></label><label><span>Ticker</span><input value={form.ticker} onChange={field('ticker')} placeholder="TOKEN" maxLength={16} /></label><label><span>Decimals</span><input value={form.decimals} onChange={field('decimals')} inputMode="numeric" /></label><label className="wide"><span>Description</span><textarea value={form.description} onChange={field('description')} placeholder="What is this launch?" /></label><label><span>Fixed supply</span><input value={form.supply} onChange={field('supply')} inputMode="numeric" /></label><label><span>Initial buy · sats</span><input value={form.buyAmount} onChange={field('buyAmount')} inputMode="numeric" /></label><label><span>Virtual BTC · sats</span><input value={form.virtualBtc} onChange={field('virtualBtc')} inputMode="numeric" /></label><label><span>Graduation threshold · sats</span><input value={form.graduationThreshold} onChange={field('graduationThreshold')} inputMode="numeric" /></label><label><span>Creator fee · bps</span><input value={form.creatorFeeBps} onChange={field('creatorFeeBps')} inputMode="numeric" /></label><label><span>Protocol fee · bps</span><input value={form.protocolFeeBps} onChange={field('protocolFeeBps')} inputMode="numeric" /></label></div>
       <button className="primary" onClick={() => void simulate()} disabled={busy || simulating}>{simulating ? 'Calculating…' : 'Simulate exact curve'}</button>{error && <div className="notice error"><b>{progress ? 'Launch action failed' : 'Invalid economics'}</b><span>{error}</span></div>}
-      {simulation && <div className="launch-simulation"><div><span>Sellable on curve</span><b>{comma(simulation.sellableTokens)}</b></div><div><span>Reserved for pool</span><b>{comma(simulation.reservedTokens)}</b></div><div><span>Initial buy output</span><b>{simulation.quote ? comma(simulation.quote.outputAmount) : '—'}</b></div><div><span>Initial buy fees</span><b>{simulation.quote ? `${comma(BigInt(simulation.quote.creatorFee) + BigInt(simulation.quote.protocolFee))} sats` : '—'}</b></div></div>}
+      {simulation && <div className="launch-simulation"><div><span>Sellable on curve</span><b>{comma(simulation.sellableTokens)}</b></div><div><span>Pool opens with</span><b>{comma(simulation.poolTokensAtGraduation)}</b></div>{BigInt(simulation.poolTokensAtGraduation) < BigInt(simulation.reservedTokens) && <div><span>Burned at graduation</span><b>{comma(BigInt(simulation.reservedTokens) - BigInt(simulation.poolTokensAtGraduation))}</b></div>}<div><span>Initial buy output</span><b>{simulation.quote ? comma(simulation.quote.outputAmount) : '—'}</b></div><div><span>Initial buy fees</span><b>{simulation.quote ? `${comma(BigInt(simulation.quote.creatorFee) + BigInt(simulation.quote.protocolFee))} sats` : '—'}</b></div></div>}
       {progress && <div className="creation-progress">{progress}</div>}{tradingEnabled ? <button className="primary" onClick={() => void createLaunch()} disabled={busy || simulating}>{busy ? 'Waiting for wallet…' : !walletAddress ? 'Connect wallet' : 'Issue assets & open launch'}</button> : <button className="primary launch-disabled" disabled>Wallet launch disabled until funded validation</button>}
     </article><aside className="create-info"><span className="panel-label">RELEASE GATE</span><h3>No unvalidated funding addresses</h3><p>The simulator uses the same integer arithmetic intended for the covenant. Asset issuance and funding remain unavailable until the complete path passes emulator and funded Mutinynet tests.</p><ul><li>Buy and sell symmetry</li><li>Final partial fill and refund</li><li>Permissionless graduation</li><li>Permanent liquidity lock</li><li>Timed recovery without stranded funds</li></ul></aside></div>
   </section>

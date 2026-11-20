@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { firstFormError, MAX_WALLET_AMOUNT, parseDisplayAmount, rawAmount, validateAssetForm, validatePoolForm } from './form-validation.ts'
+import { firstFormError, MAX_WALLET_AMOUNT, numericText, parseDisplayAmount, rawAmount, validateAssetForm, validatePoolForm } from './form-validation.ts'
 
 test('parseDisplayAmount converts display units to exact raw integers', () => {
   assert.deepEqual(parseDisplayAmount('1.5', 8), { raw: 150_000_000n })
@@ -37,7 +37,7 @@ test('validatePoolForm enforces asset selection and native-base rules', () => {
   const quote = { ticker: 'FOO', decimals: 0, balance: 5000n }
   const errors = validatePoolForm(
     { baseAssetId: 'btc', quoteAssetId: 'btc', baseAmount: '0.001', quoteAmount: '100', feeBps: '100', protocolFeeBps: '30' },
-    { base, quote, creationFeeSats: 10_000n },
+    { base, quote, btcBalance: 1_000_000n, creationFeeSats: 10_000n },
   ).errors
   assert.ok('quoteAssetId' in errors)
 })
@@ -47,11 +47,11 @@ test('validatePoolForm flags an existing pair and over-balance reserves', () => 
   const quote = { ticker: 'FOO', decimals: 0, balance: 5000n }
   assert.ok('quoteAssetId' in validatePoolForm(
     { baseAssetId: 'btc', quoteAssetId: 'foo', baseAmount: '0.001', quoteAmount: '100', feeBps: '100', protocolFeeBps: '30' },
-    { base, quote, creationFeeSats: 10_000n, existingPairName: 'BTC / FOO' },
+    { base, quote, btcBalance: 1_000_000n, creationFeeSats: 10_000n, existingPairName: 'BTC / FOO' },
   ).errors)
   assert.ok('quoteAmount' in validatePoolForm(
     { baseAssetId: 'btc', quoteAssetId: 'foo', baseAmount: '0.001', quoteAmount: '99999', feeBps: '100', protocolFeeBps: '30' },
-    { base, quote, creationFeeSats: 10_000n },
+    { base, quote, btcBalance: 1_000_000n, creationFeeSats: 10_000n },
   ).errors)
 })
 
@@ -60,11 +60,11 @@ test('validatePoolForm requires a protocol fee below the total fee', () => {
   const quote = { ticker: 'FOO', decimals: 0, balance: 5000n }
   assert.ok('protocolFeeBps' in validatePoolForm(
     { baseAssetId: 'btc', quoteAssetId: 'foo', baseAmount: '0.001', quoteAmount: '100', feeBps: '100', protocolFeeBps: '20' },
-    { base, quote, creationFeeSats: 10_000n },
+    { base, quote, btcBalance: 1_000_000n, creationFeeSats: 10_000n },
   ).errors)
   assert.ok('protocolFeeBps' in validatePoolForm(
     { baseAssetId: 'btc', quoteAssetId: 'foo', baseAmount: '0.001', quoteAmount: '100', feeBps: '100', protocolFeeBps: '100' },
-    { base, quote, creationFeeSats: 10_000n },
+    { base, quote, btcBalance: 1_000_000n, creationFeeSats: 10_000n },
   ).errors)
 })
 
@@ -73,7 +73,7 @@ test('validatePoolForm accepts a funded pair', () => {
   const quote = { ticker: 'FOO', decimals: 0, balance: 5000n }
   const result = validatePoolForm(
     { baseAssetId: 'btc', quoteAssetId: 'foo', baseAmount: '0.001', quoteAmount: '100', feeBps: '100', protocolFeeBps: '30' },
-    { base, quote, creationFeeSats: 10_000n },
+    { base, quote, btcBalance: 1_000_000n, creationFeeSats: 10_000n },
   )
   assert.deepEqual(result.valid, { baseAmount: 100_000n, quoteAmount: 100n, feeBps: 100, protocolFeeBps: 30 })
 })
@@ -82,4 +82,31 @@ test('firstFormError reports the first field in label order', () => {
   type Fields = { name: string; ticker: string; decimals: string }
   assert.equal(firstFormError<Fields>({ ticker: 'Enter a ticker', decimals: 'Whole number' }, { name: 'Name', ticker: 'Ticker', decimals: 'Decimals' }), 'Ticker: Enter a ticker')
   assert.equal(firstFormError<{ name: string }>({}, { name: 'Name' }), null)
+})
+
+test('validatePoolForm counts the three carriers a BTC pool bootstrap sends', () => {
+  const quote = { ticker: 'FOO', decimals: 0, balance: 5000n }
+  const form = { baseAssetId: 'btc', quoteAssetId: 'foo', baseAmount: '0.001', quoteAmount: '100', feeBps: '100', protocolFeeBps: '30' }
+  const short = { ticker: 'BTC', decimals: 8, balance: 100_000n + 10_000n + 989n }
+  const enough = { ticker: 'BTC', decimals: 8, balance: 100_000n + 10_000n + 990n }
+  assert.ok('baseAmount' in validatePoolForm(form, { base: short, quote, btcBalance: short.balance, creationFeeSats: 10_000n }).errors)
+  assert.ok(validatePoolForm(form, { base: enough, quote, btcBalance: enough.balance, creationFeeSats: 10_000n }).valid)
+})
+
+test('validatePoolForm requires BTC for an asset/asset bootstrap', () => {
+  const base = { ticker: 'BAR', decimals: 0, balance: 5000n }
+  const quote = { ticker: 'FOO', decimals: 0, balance: 5000n }
+  const form = { baseAssetId: 'bar', quoteAssetId: 'foo', baseAmount: '100', quoteAmount: '100', feeBps: '100', protocolFeeBps: '30' }
+  assert.ok('baseAmount' in validatePoolForm(form, { base, quote, btcBalance: 20_989n, creationFeeSats: 10_000n }).errors)
+  assert.ok(validatePoolForm(form, { base, quote, btcBalance: 20_990n, creationFeeSats: 10_000n }).valid)
+})
+
+test('numericText keeps digits and one decimal point', () => {
+  assert.equal(numericText('12a3', false), '123')
+  assert.equal(numericText('1.5', false), '15')
+  assert.equal(numericText('abc', true), '')
+  assert.equal(numericText('0,25', true), '0.25')
+  assert.equal(numericText('1.2.3', true), '1.23')
+  assert.equal(numericText('1e5', true), '15')
+  assert.equal(numericText('.5', true), '.5')
 })

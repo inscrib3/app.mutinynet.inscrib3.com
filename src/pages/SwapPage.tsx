@@ -1,5 +1,6 @@
 import { PoolPriceChart, RequestNotice, Spinner, TokenMark } from '../components'
 import { comma, displayAmount, short } from '../format'
+import { numericText } from '../form-validation'
 import type { Launch } from '../launches'
 import { minimumSwapOutput, type LiquidityPreview } from '../math'
 import type { AssetInfo, AssetRisk, DeploymentInfo, LiquidityRequest, Pool, Quote, SwapRequest, TokenDetails } from '../types'
@@ -24,6 +25,7 @@ export function SwapPage(props: {
   amount: string
   receiveAmount: string
   quoteMode: 'input' | 'output'
+  maxSpend: string | null
   quote: Quote | null
   balance: string
   slippage: number
@@ -68,7 +70,7 @@ export function SwapPage(props: {
   onSwitchPool: (pool: Pool) => void
   onViewLaunch: (id: string) => void
 }) {
-  const { mode, pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals, buyDecimals, lpDecimals, baseAsset, lpAsset, btcBalance, sellTicker, buyTicker, sellAssetId, buyAssetId, tokenDetails, amount, receiveAmount, quoteMode, quote, balance, slippage, showSettings, swapLocked, liquidityLocked, busy, connecting, walletReady, walletActionLabel, swapBlocker, liquidityBlocker, error, request, liquidityRequest, liquidityAmount, liquidityPreview, controlledPoolAssets, linkCopied, onFirePool, onFireBase, onFireQuote, onFireLaunch, deployment, onSwapModeChange, onToggleSettings, onSlippageChange, onMax, onAmountChange, onReceiveChange, onOpenPairModal, onReverse, onSwap, onSubmitLiquidity, onLiquidityChange, onDismissRequest, onDismissLiquidity, onRetrySwap, onRetryLiquidity, onCopyLink, onViewPool, onSwitchPool, onViewLaunch } = props
+  const { mode, pool, baseTicker, quoteTicker, baseDecimals, quoteDecimals, buyDecimals, lpDecimals, baseAsset, lpAsset, btcBalance, sellTicker, buyTicker, sellAssetId, buyAssetId, tokenDetails, amount, receiveAmount, quoteMode, maxSpend, quote, balance, slippage, showSettings, swapLocked, liquidityLocked, busy, connecting, walletReady, walletActionLabel, swapBlocker, liquidityBlocker, error, request, liquidityRequest, liquidityAmount, liquidityPreview, controlledPoolAssets, linkCopied, onFirePool, onFireBase, onFireQuote, onFireLaunch, deployment, onSwapModeChange, onToggleSettings, onSlippageChange, onMax, onAmountChange, onReceiveChange, onOpenPairModal, onReverse, onSwap, onSubmitLiquidity, onLiquidityChange, onDismissRequest, onDismissLiquidity, onRetrySwap, onRetryLiquidity, onCopyLink, onViewPool, onSwitchPool, onViewLaunch } = props
 
   return <>
     <section className="intro">
@@ -103,17 +105,17 @@ export function SwapPage(props: {
           <div className="asset-box">
           <div className="asset-top"><label>You pay</label><button className="balance" onClick={onMax} disabled={swapLocked}>Balance: {balance} <b>MAX</b></button></div>
           <div className="asset-main">
-            <input value={amount} onChange={(event) => onAmountChange(event.target.value)} placeholder="0" inputMode="decimal" aria-label="Amount to sell" disabled={swapLocked} />
+            <input value={amount} onChange={(event) => onAmountChange(numericText(event.target.value, true))} placeholder="0" inputMode="decimal" aria-label="Amount to sell" disabled={swapLocked} />
             <button className="token-select" onClick={onOpenPairModal}><TokenMark label={sellTicker} /><span>{sellTicker}</span><small>⌄</small></button>
           </div>
-          <div className="asset-foot"><span>{sellAssetId ? tokenDetails(sellAssetId).name : 'Select a pool'}</span><span>Arkade asset</span></div>
+          <div className="asset-foot"><span>{sellAssetId ? tokenDetails(sellAssetId).name : 'Select a pool'}</span><span>{maxSpend ? `Max spent: ${maxSpend}` : 'Arkade asset'}</span></div>
           </div>
 
           <div className="switch-row"><span /><button onClick={onReverse} disabled={swapLocked} aria-label="Reverse swap direction">↓</button><span /></div>
 
           <div className="asset-box receive">
           <div className="asset-top"><label>You receive</label><span>{quoteMode === 'output' ? 'Exact output' : 'Estimated'}</span></div>
-          <div className="asset-main"><input value={receiveAmount} onChange={(event) => onReceiveChange(event.target.value)} placeholder="0" inputMode="decimal" aria-label="Amount to receive" disabled={swapLocked} /><button className="token-select" onClick={onOpenPairModal}><TokenMark label={buyTicker} warm /><span>{buyTicker}</span><small>⌄</small></button></div>
+          <div className="asset-main"><input value={receiveAmount} onChange={(event) => onReceiveChange(numericText(event.target.value, true))} placeholder="0" inputMode="decimal" aria-label="Amount to receive" disabled={swapLocked} /><button className="token-select" onClick={onOpenPairModal}><TokenMark label={buyTicker} warm /><span>{buyTicker}</span><small>⌄</small></button></div>
           <div className="asset-foot"><span>{buyAssetId ? tokenDetails(buyAssetId).name : '—'}</span><span>{quoteMode === 'output' ? `Quoted output: ${quote ? displayAmount(quote.outputAmount, buyDecimals) : '—'}` : `Minimum: ${quote ? displayAmount(minimumSwapOutput(BigInt(quote.outputAmount), slippage), buyDecimals) : '—'}`}</span></div>
           </div>
 
@@ -135,7 +137,7 @@ export function SwapPage(props: {
           <div className="asset-box">
             <div className="asset-top"><label>{mode === 'deposit' ? 'Base amount to add' : 'LP tokens to burn'}</label><span>Raw-unit exact</span></div>
             <div className="asset-main">
-              <input value={liquidityAmount} onChange={(event) => onLiquidityChange(event.target.value)} placeholder="0" inputMode="decimal" aria-label="Liquidity amount" disabled={liquidityLocked} />
+              <input value={liquidityAmount} onChange={(event) => onLiquidityChange(numericText(event.target.value, true))} placeholder="0" inputMode="decimal" aria-label="Liquidity amount" disabled={liquidityLocked} />
               <div className="token-select static"><TokenMark label={mode === 'deposit' ? baseTicker : 'LP'} /><span>{mode === 'deposit' ? baseTicker : 'LP'}</span></div>
             </div>
             <div className="asset-foot"><span>{mode === 'deposit' ? `Balance: ${pool?.baseAssetId === 'btc' ? displayAmount(BigInt(btcBalance), 8, 8) : baseAsset ? displayAmount(BigInt(baseAsset.amount), baseDecimals) : '0'}` : `Balance: ${lpAsset ? displayAmount(BigInt(lpAsset.amount), lpDecimals) : '0'}`}</span><span>{mode === 'deposit' ? 'Pool ratio is fixed at funding' : 'Pro-rata redemption'}</span></div>

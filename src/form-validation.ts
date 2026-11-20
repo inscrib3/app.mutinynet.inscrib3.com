@@ -1,3 +1,5 @@
+import { poolBootstrapSats } from './math.ts'
+
 export const MAX_WALLET_AMOUNT = 9_007_199_254_740_991n
 const MAX_DECIMALS = 18
 const MAX_FEE_BPS = 9_999
@@ -5,6 +7,14 @@ export const MIN_PROTOCOL_FEE_BPS = 30
 const TICKER_PATTERN = /^[A-Z0-9]+$/
 
 export type AmountCheck = { raw: bigint } | { error: string }
+
+// What a numeric field may hold while typing: digits, plus one decimal point
+// when decimals are allowed. A comma counts as the point, for comma-decimal keyboards.
+export function numericText(value: string, allowDecimal: boolean): string {
+  const kept = allowDecimal ? value.replace(/,/g, '.').replace(/[^\d.]/g, '') : value.replace(/\D/g, '')
+  const point = kept.indexOf('.')
+  return point < 0 ? kept : kept.slice(0, point + 1) + kept.slice(point + 1).replace(/\./g, '')
+}
 
 export function parseDisplayAmount(value: string, decimals: number): AmountCheck {
   const text = value.trim()
@@ -62,6 +72,7 @@ export interface PoolSide { ticker: string; decimals: number; balance: bigint }
 export interface PoolFormContext {
   base?: PoolSide
   quote?: PoolSide
+  btcBalance: bigint
   creationFeeSats: bigint
   existingPairName?: string
 }
@@ -74,12 +85,18 @@ export function validatePoolForm(form: PoolFormInput, context: PoolFormContext):
   else if (form.quoteAssetId === form.baseAssetId) errors.quoteAssetId = 'Pick two different assets'
   else if (context.existingPairName) errors.quoteAssetId = `A pool already exists for this pair (${context.existingPairName})`
 
-  // BTC funding also pays the fixed creation fee, so it has to fit in the same balance.
-  const baseExtraSats = form.baseAssetId === 'btc' ? context.creationFeeSats : 0n
+  // The bootstrap payment also carries the creation fee and carrier sats.
+  // For a BTC pool they come out of the same balance as the reserve.
+  const btcBase = form.baseAssetId === 'btc'
+  const baseExtraSats = btcBase ? poolBootstrapSats('btc', 0n, context.creationFeeSats) : 0n
   const baseAmount = checkReserve(form.baseAmount, context.base, baseExtraSats)
   const quoteAmount = checkReserve(form.quoteAmount, context.quote, 0n)
   if ('error' in baseAmount) errors.baseAmount = baseAmount.error
   if ('error' in quoteAmount) errors.quoteAmount = quoteAmount.error
+  const assetPairSats = poolBootstrapSats(form.baseAssetId, 0n, context.creationFeeSats)
+  if (!btcBase && !errors.baseAmount && assetPairSats > context.btcBalance) {
+    errors.baseAmount = `Needs ${assetPairSats.toLocaleString()} sats of BTC for carriers and the creation fee`
+  }
 
   const feeBps = parseBps(form.feeBps)
   const protocolFeeBps = parseBps(form.protocolFeeBps)
@@ -96,7 +113,7 @@ function checkReserve(value: string, side: PoolSide | undefined, extraRequired: 
   const check = parseDisplayAmount(value, side.decimals)
   if ('error' in check) return check
   if (check.raw + extraRequired > side.balance) {
-    return { error: extraRequired > 0n ? `More than your ${side.ticker} balance (creation fee included)` : `More than your ${side.ticker} balance` }
+    return { error: extraRequired > 0n ? `More than your ${side.ticker} balance (creation fee and carriers included)` : `More than your ${side.ticker} balance` }
   }
   return check
 }

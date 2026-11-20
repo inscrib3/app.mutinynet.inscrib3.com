@@ -133,11 +133,16 @@ export interface PoolCreation {
   quoteAmount: string
   bootstrapAddress: string
   bootstrapSats: string
-  status: 'awaiting-funding' | 'opened'
+  status: 'awaiting-funding' | 'opened' | 'refunded'
   fundingTxid?: string
   openingTxid?: string
+  refundTxid?: string
 }
 
 export interface PoolEligibility { eligible: boolean; assetId?: string; launchId?: string; phase?: string; reason?: string }
 
 export interface TokenDetails { ticker: string; decimals: number; name: string; controlled: string | undefined }
+
+export type RefundKind = 'swap' | 'liquidity' | 'launch-request' | 'launch-bootstrap' | 'pool-creation'
+export interface RefundProof { walletKey: string; message: string; signature: string; signingAddress: string }
+export type SignRefund = (kind: RefundKind, id: string) => Promise<RefundProof>

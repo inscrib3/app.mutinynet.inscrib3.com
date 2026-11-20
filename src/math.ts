@@ -2,6 +2,9 @@
 
 // Every Arkade output the wallet funds carries at least this many sats (the API's DUST).
 export const DUST_SATS = 330n
+// Mirrors the API's ASSET_PAIR_FEE_VAULT_RESERVE: sats an asset/asset fee vault starts with.
+const ASSET_PAIR_FEE_VAULT_RESERVE_SATS = 10_330n
+const BPS = 10_000n
 
 export function maxBigInt(a: bigint, b: bigint): bigint { return a > b ? a : b }
 
@@ -40,7 +43,7 @@ export function previewLiquidity(mode: 'deposit' | 'withdraw', amount: bigint, b
 // The output the swap contract guarantees: the quote minus the slippage
 // tolerance, rounded down. The API rejects a minimum of zero.
 export function minimumSwapOutput(quotedOutput: bigint, slippageBps: number): bigint {
-  return (quotedOutput * BigInt(10_000 - slippageBps)) / 10_000n
+  return (quotedOutput * (BPS - BigInt(slippageBps))) / BPS
 }
 
 // Mirrors the API's swapFundingSats: the BTC the wallet sends with a swap.
@@ -51,4 +54,21 @@ export function swapFundingSats(sellAmount: bigint, sellAssetId: string, carrier
 // The BTC carrier a deposit sends: dust plus the base reserve when it is native BTC.
 export function depositFundingSats(baseAssetId: string, baseAmount: bigint): bigint {
   return DUST_SATS + (baseAssetId === 'btc' ? baseAmount : 0n)
+}
+
+// Mirrors the API's bootstrapSats: the BTC a pool-creation payment sends.
+// BTC pools: the reserve plus pool, LP and fee-vault carriers. Asset pairs: two
+// carriers plus the fee-vault reserve. Both add the creation fee.
+export function poolBootstrapSats(baseAssetId: string, baseAmount: bigint, creationFeeSats: bigint): bigint {
+  return baseAssetId === 'btc'
+    ? baseAmount + DUST_SATS * 3n + creationFeeSats
+    : DUST_SATS * 2n + ASSET_PAIR_FEE_VAULT_RESERVE_SATS + creationFeeSats
+}
+
+// For an exact-output swap the requested output is the guaranteed minimum, so
+// slippage tolerance goes on the input instead, rounded up. Any surplus input
+// is priced into the same swap and returns as extra output.
+export function exactOutputSellAmount(quotedInput: bigint, slippageBps: number): bigint {
+  const numerator = quotedInput * (BPS + BigInt(slippageBps))
+  return (numerator + BPS - 1n) / BPS
 }

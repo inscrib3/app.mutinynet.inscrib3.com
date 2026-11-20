@@ -193,6 +193,7 @@ aside { display: flex; flex-direction: column; gap: 16px; }
 .search-empty { border: 1px solid var(--line); border-radius: 18px; background: rgba(255,255,255,.018); }
 .secondary { padding: 11px 15px; border: 1px solid var(--line); border-radius: 10px; color: #e8ebe9; background: rgba(255,255,255,.035); cursor: pointer; font: 500 10px var(--mono); letter-spacing: .04em; text-transform: uppercase; }
 .secondary:hover { border-color: rgba(52,211,153,.5); color: var(--green-light); background: var(--green-soft); }.secondary.full { width: 100%; margin-top: 19px; }
+.button-row { display: flex; gap: 8px; margin-top: 12px; }.button-row > .secondary { flex: 1; }
 .secondary.load-more { min-width: 190px; margin: 24px auto 0; display: block; }
 .pool-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 18px; }
 .pool-card { padding: 25px; border-radius: 20px; }.pool-card:hover { border-color: rgba(52,211,153,.3); }
