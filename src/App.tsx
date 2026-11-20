@@ -170,6 +170,8 @@ async function restoreFundedPoolCreation(saved: SavedPayment | undefined): Promi
   } catch { return null }
 }
 
+const READING_BALANCES = 'Reading wallet balance…'
+
 function App() {
   useAutomaticLanguage()
 
@@ -198,6 +200,8 @@ function App() {
   const [walletMode, setWalletMode] = useState<WalletMode | null>(null)
   const [assets, setAssets] = useState<AssetInfo[]>([])
   const [btcBalance, setBtcBalance] = useState(0)
+  // False until the wallet has reported balances, so pages show a reading state instead of 0.
+  const [balancesLoaded, setBalancesLoaded] = useState(false)
   const [sellAssetId, setSellAssetId] = useState('btc')
   const [amount, setAmount] = useState('')
   const [receiveAmount, setReceiveAmount] = useState('')
@@ -510,7 +514,7 @@ function App() {
     if (!window.arkade || !address || walletOnWrongNetwork) return
     const [nextAssets, nextBalance] = await Promise.all([window.arkade.getAssets(), window.arkade.getBalance()])
     assertProviderAmounts(nextAssets, nextBalance)
-    setAssets(nextAssets); setBtcBalance(nextBalance.available)
+    setAssets(nextAssets); setBtcBalance(nextBalance.available); setBalancesLoaded(true)
   }, [address, walletOnWrongNetwork, setAssets, setBtcBalance])
 
   const loadWallet = useCallback(async (provider: ArkadeProvider, knownAddress?: string) => {
@@ -533,7 +537,7 @@ function App() {
       api<{ items: LeaderboardEntry[] }>('/v1/points/leaderboard?limit=5'),
     ])
     assertProviderAmounts(nextAssets, nextBalance)
-    setAssets(nextAssets); setBtcBalance(nextBalance.available); setPoints(summary); setLeaderboard(leaders.items)
+    setAssets(nextAssets); setBtcBalance(nextBalance.available); setBalancesLoaded(true); setPoints(summary); setLeaderboard(leaders.items)
   }, [])
 
   // A locked wallet gets a banner that waits for the unlock; other failures are one-off toasts.
@@ -710,7 +714,7 @@ function App() {
     const sync = () => void loadWallet(provider).catch(showWalletError)
     const syncAccounts = (data?: unknown) => {
       if (Array.isArray(data) && data.length === 0) {
-        setAddress(''); setIdentityKey(''); setAssets([]); setBtcBalance(0); setWalletMode(null); setWalletNetwork(null)
+        setAddress(''); setIdentityKey(''); setAssets([]); setBtcBalance(0); setBalancesLoaded(false); setWalletMode(null); setWalletNetwork(null)
         if (provider.isPwa) window.arkade = undefined
         return
       }
@@ -1115,7 +1119,8 @@ function App() {
     finally { setBusy(false) }
   }
 
-  const balance = sellAssetId === 'btc' ? displayAmount(BigInt(btcBalance), 8, 8) : sellAsset ? displayAmount(BigInt(sellAsset.amount), sellDecimals, 4) : '0'
+  const readingBalances = Boolean(address) && !walletOnWrongNetwork && !balancesLoaded
+  const balance = readingBalances ? '…' : sellAssetId === 'btc' ? displayAmount(BigInt(btcBalance), 8, 8) : sellAsset ? displayAmount(BigInt(sellAsset.amount), sellDecimals, 4) : '0'
   const walletActionLabel = !address ? 'Connect Inscrib3 Wallet' : walletOnWrongNetwork ? SWITCH_NETWORK_LABEL : null
   const baseTicker = pool?.baseAssetId === 'btc' ? 'BTC' : baseAsset?.metadata?.ticker ?? pool?.baseAssetInfo?.metadata?.ticker ?? 'BASE'
   const quoteTicker = pool?.quoteAssetId === 'btc' ? 'BTC' : quoteAsset?.metadata?.ticker ?? pool?.quoteAssetInfo?.metadata?.ticker ?? 'QUOTE'
@@ -1127,6 +1132,7 @@ function App() {
     : poolOpeningPending ? 'Finish opening your funded pool first'
     : poolForm.baseAssetId && poolForm.quoteAssetId && !currentPoolEligibility ? 'Checking whether this pair is eligible…'
     : currentPoolEligibility && !currentPoolEligibility.eligible ? currentPoolEligibility.reason ?? 'This pair is reserved for the launch market'
+    : readingBalances ? READING_BALANCES
     : deployment ? firstFormError(poolValidation.errors, POOL_FIELD_LABELS) : 'Pool creation is unavailable right now'
 
   function swapMinimumOutput(swapQuote: Quote): bigint {
@@ -1141,6 +1147,7 @@ function App() {
     if (!pool.swapEnabled) return 'Legacy pool · swaps disabled during migration'
     const typedAmount = quoteMode === 'input' ? sellAmountCheck : parseDisplayAmount(receiveAmount, buyDecimals)
     if ('error' in typedAmount) return typedAmount.error
+    if (readingBalances) return READING_BALANCES
     if (swapSellAmount && swapSellAmount > walletBalance(sellAssetId)) return `Insufficient ${sellTicker} balance`
     if (!quote) return 'Finding best price…'
     if (swapMinimumOutput(quote) <= 0n) return `Amount too small: the minimum ${buyTicker} received rounds to zero`
@@ -1156,6 +1163,7 @@ function App() {
     if (mode === 'withdraw' && !pool.withdrawalEnabled) return 'Withdrawals unavailable'
     const typedAmount = parseDisplayAmount(liquidityAmount, mode === 'withdraw' ? lpDecimals : baseDecimals)
     if ('error' in typedAmount) return typedAmount.error
+    if (readingBalances) return READING_BALANCES
     if (!liquidityPreview) return 'Pool reserves unavailable'
     const zeroTicker = liquidityZeroTicker(liquidityPreview)
     if (zeroTicker) return `Amount too small: the ${zeroTicker} ${mode === 'withdraw' ? 'returned' : 'required'} rounds to zero`
@@ -1218,7 +1226,7 @@ function App() {
       <main>
         {page === 'swap' ? <SwapPage mode={mode} pool={pool} baseTicker={baseTicker} quoteTicker={quoteTicker} baseDecimals={baseDecimals} quoteDecimals={quoteDecimals} buyDecimals={buyDecimals} lpDecimals={lpDecimals} baseAsset={baseAsset} lpAsset={lpAsset} btcBalance={btcBalance} sellTicker={sellTicker} buyTicker={buyTicker} sellAssetId={sellAssetId} buyAssetId={buyAssetId} tokenDetails={tokenDetails} amount={amount} receiveAmount={receiveAmount} quoteMode={quoteMode} maxSpend={quoteMode === 'output' && swapSellAmount ? `${displayAmount(swapSellAmount, sellDecimals, 8)} ${sellTicker}` : null} quote={quote} balance={balance} slippage={slippage} showSettings={showSettings} swapLocked={swapLocked} liquidityLocked={liquidityLocked} busy={busy} connecting={connecting} walletReady={walletReady} walletActionLabel={walletActionLabel} swapBlocker={swapBlocker} liquidityBlocker={liquidityBlocker} error={error} request={request} liquidityRequest={liquidityRequest} liquidityAmount={liquidityAmount} liquidityPreview={liquidityPreview} controlledPoolAssets={controlledPoolAssets} linkCopied={linkCopied} onFirePool={onFirePool} onFireBase={onFireBase} onFireQuote={onFireQuote} onFireLaunch={onFireLaunch} deployment={deployment} onSwapModeChange={updateSwapMode} onToggleSettings={() => setShowSettings(!showSettings)} onSlippageChange={setSlippage} onMax={setMaxAmount} onAmountChange={(value) => { setQuoteMode('input'); setAmount(value); setReceiveAmount(''); setQuote(null); setRequest(null); setError('') }} onReceiveChange={(value) => { setQuoteMode('output'); setReceiveAmount(value); setAmount(''); setQuote(null); setRequest(null); setError('') }} onOpenPairModal={openPairModal} onReverse={reverse} onSwap={() => void swap()} onSubmitLiquidity={() => void submitLiquidity()} onLiquidityChange={(value) => { setLiquidityAmount(value); setLiquidityRequest(null); setError('') }} onDismissRequest={() => setRequest(null)} onDismissLiquidity={() => setLiquidityRequest(null)} onRetrySwap={() => { if (request) void retryRegistration(`/v1/swaps/${request.id}`, request, setRequest) }} onRetryLiquidity={() => { if (liquidityRequest) void retryRegistration(`/v1/liquidity/${liquidityRequest.id}`, liquidityRequest, setLiquidityRequest) }} onCopyLink={() => void copySwapLink()} onViewPool={openPoolDetail} onSwitchPool={(target) => switchToPool(target)} onViewLaunch={(id) => navigate('launch', id)} /> : page === 'launches' ? <LaunchesPage onOpen={(id) => navigate('launch', id)} onCreate={() => navigate('launch-create')} />
         : page === 'launch' ? <LaunchDetailPage key={launchId} id={launchId} onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
-          walletAddress={address} walletBalance={walletBalance} walletBalancesAvailable={true} popupWallet={popupWallet} refreshWallet={refreshAssets} connectWallet={() => void requireWallet()}
+          walletAddress={address} walletBalance={walletBalance} walletBalancesAvailable={balancesLoaded} popupWallet={popupWallet} refreshWallet={refreshAssets} connectWallet={() => void requireWallet()}
           fundContract={fundLaunchContract} signRefund={signRefund} identityKey={identityKey} referralCode={referralCode} />
         : page === 'launch-create' ? <CreateLaunchPage onBack={() => navigate('launches')} tradingEnabled={Boolean(deployment?.launches?.tradingEnabled)}
           walletAddress={address} popupWallet={popupWallet} connectWallet={() => void requireWallet()} issueAsset={issueLaunchAsset} fundContract={fundLaunchContract}

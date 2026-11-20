@@ -264,6 +264,7 @@ export const chineseTranslations: Record<string, string> = {
   'Issue pool assets & open pool': '发行流动性池资产并开启流动性池',
   'Retry opening': '重试开启',
   'Refund to my wallet': '退款到我的钱包',
+  'Reading wallet balance…': '正在读取钱包余额…',
   'Curve floor': '曲线下限',
   'All reserved tokens seed the pool': '全部预留代币注入流动性池',
   'Pool opens at the final curve price; the rest of the floor is burned': '流动性池以曲线最终价格开启；下限中剩余的代币将被销毁',
