@@ -7,9 +7,9 @@ export interface DeploymentInfo {
   network: 'mutinynet' | 'mainnet'
   platformTreasuryAddress: string
   poolCreationFeeSats: string
-  ammContractGeneration: 'amm-v2'
+  ammContractGeneration: 'amm-v2' | 'amm-v3'
   maxSwapBatch: number
-  launches?: { catalog: boolean; protocol: 'curve-v1'; tradingEnabled: boolean; reason: string }
+  launches?: { catalog: boolean; protocol: 'curve-v1' | 'curve-v2' | 'curve-v3'; tradingEnabled: boolean; reason: string }
 }
 
 export interface NetworkInfo {

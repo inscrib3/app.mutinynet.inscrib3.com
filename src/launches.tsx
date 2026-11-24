@@ -8,8 +8,8 @@ import type { SignRefund } from './types'
 
 export type LaunchPhase = 'preparing' | 'curve' | 'graduating' | 'pool' | 'rescued' | 'failed'
 export type LaunchSort = 'newest' | 'graduating' | 'trending'
-// curve-v2 burns tokens above the price-matched pool reserve at graduation.
-export type CurveGeneration = 'curve-v1' | 'curve-v2'
+// curve-v2 burns tokens above the price-matched pool reserve at graduation. curve-v3 adds keyless renewal.
+export type CurveGeneration = 'curve-v1' | 'curve-v2' | 'curve-v3'
 
 export interface Launch {
   id: string
