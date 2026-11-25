@@ -1,4 +1,4 @@
-import { PoolPriceChart, TokenMark } from '../components'
+import { PoolPriceChart, TokenMark, TxLink } from '../components'
 import { displayAmount, ratio, short } from '../format'
 import type { ActivityEvent, Pool, TokenDetails } from '../types'
 
@@ -45,7 +45,7 @@ export function PoolDetailPage({ pool, onBack, onTrade, tokenDetails, activity, 
         const isSwap = item.activityType === 'swap'
         const sold = isSwap && item.sellAssetId ? tokenDetails(item.sellAssetId) : undefined
         const amountText = isSwap ? `${displayAmount(item.sellAmount ?? '0', sold?.decimals ?? 0)} ${sold?.ticker ?? 'ASSET'}` : item.activityType === 'deposit' ? `${displayAmount(item.baseAmount, base.decimals)} ${base.ticker} + ${displayAmount(item.quoteAmount, quoteToken.decimals)} ${quoteToken.ticker}` : `${displayAmount(item.lpAmount, base.decimals)} LP`
-        return <div className="activity-row" key={`${item.activityType}-${item.id}`}><div><span className={`activity-icon ${item.activityType}`}>{isSwap ? '↔' : item.activityType === 'deposit' ? '+' : '−'}</span><div><b>{isSwap ? 'Swap' : item.activityType === 'deposit' ? 'Add liquidity' : 'Remove liquidity'}</b><small>{item.createdAt ? new Date(item.createdAt).toLocaleString() : short(item.id)}</small></div></div><code>{amountText}</code><span className={`status-pill ${item.status}`}>{item.status.replace('-', ' ')}</span><code title={item.settlementTxid ?? item.fundingTxid ?? ''}>{item.settlementTxid || item.fundingTxid ? short(item.settlementTxid ?? item.fundingTxid!, 7) : '—'}</code></div>
+        return <div className="activity-row" key={`${item.activityType}-${item.id}`}><div><span className={`activity-icon ${item.activityType}`}>{isSwap ? '↔' : item.activityType === 'deposit' ? '+' : '−'}</span><div><b>{isSwap ? 'Swap' : item.activityType === 'deposit' ? 'Add liquidity' : 'Remove liquidity'}</b><small>{item.createdAt ? new Date(item.createdAt).toLocaleString() : short(item.id)}</small></div></div><code>{amountText}</code><span className={`status-pill ${item.status}`}>{item.status.replace('-', ' ')}</span><TxLink txid={item.settlementTxid || item.fundingTxid} edge={7} /></div>
       })}
     </div>
     {hasMore && <button className="secondary load-more" onClick={onLoadMore}>Load more activity</button>}

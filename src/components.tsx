@@ -1,5 +1,5 @@
 import { api } from './api'
-import { type PriceTimeframe } from './format'
+import { short, type PriceTimeframe } from './format'
 import { decimalRatio } from './math'
 import { PriceChart, type ChartPoint } from './PriceChart'
 import { describeRequest, type RequestProgress } from './requests'
@@ -7,6 +7,13 @@ import type { Pool, PriceHistory } from './types'
 
 export function TokenMark({ label, warm = false }: { label: string; warm?: boolean }) {
   return <span className={`token-mark ${warm ? 'warm' : ''}`}>{label.slice(0, 1).toUpperCase()}</span>
+}
+
+const ARKADE_EXPLORER = import.meta.env.VITE_NETWORK === 'mainnet' ? 'https://arkade.space' : 'https://explorer.mutinynet.arkade.sh'
+
+export function TxLink({ txid, edge }: { txid?: string; edge?: number }) {
+  if (!txid) return <code>—</code>
+  return <code title={txid}><a className="tx-link" href={`${ARKADE_EXPLORER}/tx/${txid}`} target="_blank" rel="noreferrer">{edge ? short(txid, edge) : txid}</a></code>
 }
 
 export function Spinner() { return <span className="spinner" aria-hidden="true" /> }

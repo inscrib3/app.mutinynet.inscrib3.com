@@ -1,3 +1,4 @@
+import { TxLink } from '../components'
 import { comma, displayAmount, short } from '../format'
 import type { LeaderboardEntry, PointsSummary, Pool, TokenDetails, WalletActivityEvent } from '../types'
 
@@ -19,7 +20,7 @@ export function ActivityPage({ address, connecting, connect, onRefresh, points, 
         if (item.activityType === 'launch-trade') return <div className="activity-row" key={`launch-trade-${item.id}`}>
           <div><span className="activity-icon launch-trade">↗</span><div><b>{item.side === 'buy' ? 'Launch buy' : 'Launch sell'}</b><small>{item.launchId} · {item.venue} · {new Date(item.createdAt).toLocaleString()} · +{comma(item.rewardPoints)} PTS</small></div></div>
           <code>{comma(item.inputAmount)} {item.side === 'buy' ? 'sats' : 'raw units'}</code><span className={`status-pill ${item.status}`}>{item.status.replace('-', ' ')}</span>
-          <code title={item.settlementTxid ?? item.fundingTxid ?? ''}>{item.settlementTxid || item.fundingTxid ? short(item.settlementTxid ?? item.fundingTxid!, 7) : '—'}</code>
+          <TxLink txid={item.settlementTxid || item.fundingTxid} edge={7} />
         </div>
         const isSwap = item.activityType === 'swap'
         const sold = item.activityType === 'swap' && item.sellAssetId ? tokenDetails(item.sellAssetId) : undefined
@@ -34,7 +35,7 @@ export function ActivityPage({ address, connecting, connect, onRefresh, points, 
         return <div className="activity-row" key={`${item.activityType}-${item.id}`}>
           <div><span className={`activity-icon ${item.activityType}`}>{item.activityType === 'swap' ? '↔' : item.activityType === 'deposit' ? '+' : '−'}</span><div><b>{item.activityType === 'swap' ? 'Swap' : item.activityType === 'deposit' ? 'Add liquidity' : 'Remove liquidity'}</b><small>{activityPool?.name ?? item.poolId} · {item.createdAt ? new Date(item.createdAt).toLocaleString() : short(item.id)}</small></div></div>
           <code>{amountText}</code><span className={`status-pill ${item.status}`}>{item.status.replace('-', ' ')}</span>
-          <code title={item.settlementTxid ?? item.fundingTxid ?? ''}>{item.settlementTxid || item.fundingTxid ? short(item.settlementTxid ?? item.fundingTxid!, 7) : '—'}</code>
+          <TxLink txid={item.settlementTxid || item.fundingTxid} edge={7} />
         </div>
       })}
     </div></>}

@@ -1,4 +1,4 @@
-import { FieldError, Spinner } from '../components'
+import { FieldError, Spinner, TxLink } from '../components'
 import { comma, poolAssetTickers, short } from '../format'
 import { MIN_PROTOCOL_FEE_BPS, numericText, type AssetFormInput, type FormErrors, type PoolFormInput, type ValidAsset, type ValidPool } from '../form-validation'
 import type { AssetInfo, DeploymentInfo, IssueAssetResult, PoolAssetIssuance, PoolCreation, PoolEligibility, TokenDetails } from '../types'
@@ -64,7 +64,7 @@ export function CreatePage(props: {
         </div>
         <button className="primary" disabled={busy || connecting || (walletReady && assetFormBlocker !== null)} onClick={() => void createAsset()}>{busy && <Spinner />}{walletActionLabel ?? assetFormBlocker ?? 'Review asset issuance'}</button>
         {creationStep && <div className="creation-progress"><i className={issuedAsset ? 'done' : ''} /><span>{creationStep}</span></div>}
-        {issuedAsset && <div className="result-box"><span>Asset ID</span><code>{issuedAsset.assetId}</code><span>Issuance transaction</span><code>{issuedAsset.arkTxId}</code></div>}
+        {issuedAsset && <div className="result-box"><span>Asset ID</span><code>{issuedAsset.assetId}</code><span>Issuance transaction</span><TxLink txid={issuedAsset.arkTxId} /></div>}
       </article>
       <aside className="create-info"><span className="panel-label">WHAT HAPPENS</span><h3>Your keys issue the asset</h3><p>The wallet shows an approval before signing. Supply and metadata are submitted directly to Arkade; the AMM backend never receives your keys or assets.</p><ul><li>Raw amounts stay integer-exact</li><li>Metadata is immutable for this issuance</li><li>The asset appears in Inscrib3 Wallet</li></ul></aside>
     </div> : <div className="create-layout">
@@ -94,7 +94,7 @@ export function CreatePage(props: {
         <button className="primary" disabled={busy || connecting || (walletReady && poolFormBlocker !== null)} onClick={() => void createPool()}>{busy && <Spinner />}{walletActionLabel ?? poolFormBlocker ?? (poolAssetIssuance ? 'Resume pool creation' : 'Issue pool assets & open pool')}</button>
         {creationStep && <div className="creation-progress"><i className={poolCreation?.status === 'opened' ? 'done' : ''} /><span>{creationStep}</span></div>}
         {poolOpeningPending && <div className="button-row"><button className="secondary" disabled={busy} onClick={() => void retryPoolOpening()}>Retry opening</button><button className="secondary" disabled={busy} onClick={() => void props.refundPoolCreation()}>Refund to my wallet</button></div>}
-        {poolCreation && <div className="result-box"><span>Status</span><b>{poolCreation.status}</b>{poolCreation.status === 'opened' && <><span>Points earned</span><b className="points-earned">+10 PTS</b></>}<span>Bootstrap covenant</span><code>{poolCreation.bootstrapAddress}</code>{poolCreation.openingTxid && <><span>Opening transaction</span><code>{poolCreation.openingTxid}</code></>}</div>}
+        {poolCreation && <div className="result-box"><span>Status</span><b>{poolCreation.status}</b>{poolCreation.status === 'opened' && <><span>Points earned</span><b className="points-earned">+10 PTS</b></>}<span>Bootstrap covenant</span><code>{poolCreation.bootstrapAddress}</code>{poolCreation.openingTxid && <><span>Opening transaction</span><TxLink txid={poolCreation.openingTxid} /></>}</div>}
       </article>
       <aside className="create-info"><span className="panel-label">ONE ATOMIC FUNDING</span><h3>Permissionless, not custodial</h3><p>Inscrib3 issues the control, LP, and ledger assets, then funds liquidity, technical carriers, and the fixed creation fee in one bootstrap payment. The contract opens and distributes everything atomically.</p><ul><li>BTC remains native and unwrapped</li><li>The creation fee reaches the stable Treasury Vault</li><li>Protocol fee is at least 0.30% and below the total fee</li></ul><a className="panel-doc-link" href="https://docs.inscrib3.com/app/pools-liquidity" target="_blank" rel="noreferrer">Pool and liquidity guide ↗</a></aside>
     </div>}

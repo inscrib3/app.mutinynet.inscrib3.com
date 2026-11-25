@@ -276,7 +276,8 @@ aside { display: flex; flex-direction: column; gap: 16px; }
 .creation-progress { margin-top: 14px; padding: 12px 14px; display: flex; align-items: center; gap: 10px; border: 1px solid rgba(52,211,153,.2); border-radius: 10px; color: var(--green-light); background: var(--green-soft); font: 10px var(--mono); }
 .creation-progress i { width: 8px; height: 8px; border: 1px solid var(--green); border-radius: 50%; animation: pulse 1.5s infinite; }.creation-progress i.done { background: var(--green); animation: none; }
 .result-box { margin-top: 14px; padding: 14px; display: grid; grid-template-columns: 130px minmax(0,1fr); gap: 9px 15px; border: 1px solid var(--line); border-radius: 10px; background: rgba(0,0,0,.28); }
-.result-box span { color: var(--dim); font-size: 10px; }.result-box code, .result-box b { overflow: hidden; color: #c6ccc9; font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.result-box span { color: var(--dim); font-size: 10px; }
+.tx-link { color: inherit; text-decoration: none; }.tx-link:hover { color: var(--green); text-decoration: underline; }.result-box code, .result-box b { overflow: hidden; color: #c6ccc9; font: 10px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
 .create-error { max-width: 720px; }
 
 .launch-toolbar { margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; gap: 16px; }
