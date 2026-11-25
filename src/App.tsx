@@ -5,7 +5,7 @@ import { TokenMark } from './components'
 import type { RequestProgress } from './requests'
 import { firstFormError, MAX_WALLET_AMOUNT, MIN_PROTOCOL_FEE_BPS, parseDisplayAmount, rawAmount, validateAssetForm, validatePoolForm, type AssetFormInput, type PoolFormInput } from './form-validation'
 import { comma, displayAmount, editableAmount, poolAssetTickers, short } from './format'
-import { DUST_SATS, depositFundingSats, exactOutputSellAmount, maxBigInt, minimumSwapOutput, previewLiquidity, swapFundingSats } from './math'
+import { DUST_SATS, depositFundingSats, exactOutputSellAmount, maxBigInt, minimumSwapOutput, poolBootstrapSats, previewLiquidity, swapFundingSats } from './math'
 import { loadSavedPayments, savePayment, type PaymentKind, type SavedPayment } from './open-payments'
 import { describeWalletError, errorMessage, WALLET_INSTALL_URL, type WalletIssue } from './wallet-issues'
 import { CreateLaunchPage, LaunchDetailPage, LaunchesPage, type Launch } from './launches'
@@ -301,6 +301,20 @@ function App() {
   function walletBalance(assetId: string): bigint {
     if (assetId === 'btc') return BigInt(btcBalance)
     return BigInt(assets.find((item) => item.assetId === assetId)?.amount ?? 0)
+  }
+
+  // A BTC reserve shares the wallet balance with the creation fee and carriers,
+  // so MAX leaves exactly what validatePoolForm requires for them.
+  function maxPoolReserve(assetId: string): bigint {
+    const reservedSats = assetId === 'btc' ? poolBootstrapSats('btc', 0n, BigInt(deployment?.poolCreationFeeSats ?? '0')) : 0n
+    return maxBigInt(0n, walletBalance(assetId) - reservedSats)
+  }
+
+  function setMaxPoolReserve(side: 'base' | 'quote') {
+    const assetId = side === 'base' ? poolForm.baseAssetId : poolForm.quoteAssetId
+    if (!assetId) return
+    const amount = editableAmount(maxPoolReserve(assetId), tokenDetails(assetId).decimals)
+    setPoolForm((current) => side === 'base' ? { ...current, baseAmount: amount } : { ...current, quoteAmount: amount })
   }
 
   function updatePoolPair(baseAssetId: string, quoteAssetId: string) {
@@ -1121,6 +1135,7 @@ function App() {
 
   const readingBalances = Boolean(address) && !walletOnWrongNetwork && !balancesLoaded
   const balance = readingBalances ? '…' : sellAssetId === 'btc' ? displayAmount(BigInt(btcBalance), 8, 8) : sellAsset ? displayAmount(BigInt(sellAsset.amount), sellDecimals, 4) : '0'
+  const poolReserveBalance = (assetId: string) => !address || !assetId ? '—' : readingBalances ? '…' : displayAmount(walletBalance(assetId), tokenDetails(assetId).decimals, 8)
   const walletActionLabel = !address ? 'Connect Inscrib3 Wallet' : walletOnWrongNetwork ? SWITCH_NETWORK_LABEL : null
   const baseTicker = pool?.baseAssetId === 'btc' ? 'BTC' : baseAsset?.metadata?.ticker ?? pool?.baseAssetInfo?.metadata?.ticker ?? 'BASE'
   const quoteTicker = pool?.quoteAssetId === 'btc' ? 'BTC' : quoteAsset?.metadata?.ticker ?? pool?.quoteAssetInfo?.metadata?.ticker ?? 'QUOTE'
@@ -1232,7 +1247,7 @@ function App() {
           walletAddress={address} popupWallet={popupWallet} connectWallet={() => void requireWallet()} issueAsset={issueLaunchAsset} fundContract={fundLaunchContract}
           onOpened={(id) => navigate('launch', id)} identityKey={identityKey} referralCode={referralCode} />
         : page === 'pools' ? <PoolsPage query={poolSearch} updateQuery={updatePoolSearch} pools={filteredPools} total={poolResultTotal} assets={assets} onView={openPoolDetail} onTrade={(item) => switchToPool(item, 'push')} hasMore={Boolean(poolCursor)} onRefresh={() => runWithToast(refreshPools)} onLoadMore={() => runWithToast(loadMorePools)} /> : page === 'pool' ? <PoolDetailPage pool={pool} onBack={() => navigate('pools')} onTrade={(target) => switchToPool(target, 'push')} tokenDetails={tokenDetails} activity={activity as ActivityEvent[]} hasMore={Boolean(activityCursor)} onRefresh={() => runWithToast(refreshPoolActivity)} onLoadMore={() => runWithToast(loadMoreActivity)} />
-        : page === 'faucet' ? <FaucetPage address={address} walletOnWrongNetwork={walletOnWrongNetwork} connecting={connecting} connect={() => void connect()} copyFaucetAddress={copyFaucetAddress} faucetCopied={faucetCopied} /> : page === 'leaderboard' ? <LeaderboardPage entries={globalLeaderboard} total={globalLeaderboardTotal} loading={globalLeaderboardLoading} error={globalLeaderboardError} hasMore={globalLeaderboardOffset !== undefined} query={leaderboardQuery} updateQuery={updateLeaderboardQuery} loadMore={() => void loadMoreLeaderboard()} identityKey={points?.identityKey} /> : page === 'create' ? <CreatePage createMode={createMode} onSelectMode={updateCreateMode} busy={busy} connecting={connecting} walletReady={walletReady} walletActionLabel={walletActionLabel} error={error} assetForm={assetForm} onAssetFormChange={setAssetForm} assetValidation={assetValidation} assetFormBlocker={assetFormBlocker} createAsset={() => void createAsset()} creationStep={creationStep} issuedAsset={issuedAsset} poolForm={poolForm} onPoolFormChange={setPoolForm} updatePoolPair={updatePoolPair} assets={assets} poolValidation={poolValidation} creationBaseDetails={creationBaseDetails} creationQuoteDetails={creationQuoteDetails} creationBaseAmount={creationBaseAmount} creationQuoteAmount={creationQuoteAmount} initialLiquiditySummary={initialLiquiditySummary} deployment={deployment} bootstrapSummary={bootstrapSummary} currentPoolEligibility={currentPoolEligibility} controlledCreationAssets={controlledCreationAssets} poolFormBlocker={poolFormBlocker} poolAssetIssuance={poolAssetIssuance} poolCreation={poolCreation} poolOpeningPending={poolOpeningPending} createPool={() => void createPool()} retryPoolOpening={() => void retryPoolOpening()} refundPoolCreation={() => void refundPoolCreation()} />
+        : page === 'faucet' ? <FaucetPage address={address} walletOnWrongNetwork={walletOnWrongNetwork} connecting={connecting} connect={() => void connect()} copyFaucetAddress={copyFaucetAddress} faucetCopied={faucetCopied} /> : page === 'leaderboard' ? <LeaderboardPage entries={globalLeaderboard} total={globalLeaderboardTotal} loading={globalLeaderboardLoading} error={globalLeaderboardError} hasMore={globalLeaderboardOffset !== undefined} query={leaderboardQuery} updateQuery={updateLeaderboardQuery} loadMore={() => void loadMoreLeaderboard()} identityKey={points?.identityKey} /> : page === 'create' ? <CreatePage createMode={createMode} onSelectMode={updateCreateMode} busy={busy} connecting={connecting} walletReady={walletReady} walletActionLabel={walletActionLabel} error={error} assetForm={assetForm} onAssetFormChange={setAssetForm} assetValidation={assetValidation} assetFormBlocker={assetFormBlocker} createAsset={() => void createAsset()} creationStep={creationStep} issuedAsset={issuedAsset} poolForm={poolForm} onPoolFormChange={setPoolForm} updatePoolPair={updatePoolPair} assets={assets} poolValidation={poolValidation} creationBaseDetails={creationBaseDetails} creationQuoteDetails={creationQuoteDetails} creationBaseAmount={creationBaseAmount} creationQuoteAmount={creationQuoteAmount} baseBalance={poolReserveBalance(poolForm.baseAssetId)} quoteBalance={poolReserveBalance(poolForm.quoteAssetId)} balancesReady={Boolean(address) && !walletOnWrongNetwork && !readingBalances} onMaxReserve={setMaxPoolReserve} initialLiquiditySummary={initialLiquiditySummary} deployment={deployment} bootstrapSummary={bootstrapSummary} currentPoolEligibility={currentPoolEligibility} controlledCreationAssets={controlledCreationAssets} poolFormBlocker={poolFormBlocker} poolAssetIssuance={poolAssetIssuance} poolCreation={poolCreation} poolOpeningPending={poolOpeningPending} createPool={() => void createPool()} retryPoolOpening={() => void retryPoolOpening()} refundPoolCreation={() => void refundPoolCreation()} />
         : <ActivityPage address={address} connecting={connecting} connect={() => void connect()} onRefresh={() => runWithToast(() => Promise.all([refreshWalletActivity(), refreshPoints()]))} points={points} leaderboard={leaderboard} onViewLeaderboard={() => navigate('leaderboard')} activity={activity} hasMore={Boolean(activityCursor)} onLoadMore={() => runWithToast(loadMoreActivity)} tokenDetails={tokenDetails} pools={pools} />}
       </main>
 

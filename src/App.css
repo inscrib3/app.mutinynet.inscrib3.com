@@ -264,6 +264,7 @@ aside { display: flex; flex-direction: column; gap: 16px; }
 .form-grid label { min-width: 0; display: flex; flex-direction: column; gap: 8px; color: var(--muted); font-size: 11px; }
 .form-grid label.wide { grid-column: 1 / -1; }
 .form-grid label small { color: var(--dim); }
+.form-grid .reserve-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 4px 8px; }
 .form-grid input, .form-grid select { width: 100%; min-height: 47px; padding: 0 13px; border: 1px solid var(--line); border-radius: 10px; outline: 0; color: var(--text); background: rgba(7,9,8,.78); font: 12px var(--mono); }
 .form-grid textarea { width: 100%; min-height: 96px; padding: 13px; resize: vertical; border: 1px solid var(--line); border-radius: 10px; outline: 0; color: var(--text); background: rgba(7,9,8,.78); font: 12px/1.6 var(--mono); }
 .form-grid textarea:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(52,211,153,.07); }

@@ -29,6 +29,10 @@ export function CreatePage(props: {
   creationQuoteDetails?: TokenDetails
   creationBaseAmount: bigint | null
   creationQuoteAmount: bigint | null
+  baseBalance: string
+  quoteBalance: string
+  balancesReady: boolean
+  onMaxReserve: (side: 'base' | 'quote') => void
   initialLiquiditySummary: string
   deployment: DeploymentInfo | null
   bootstrapSummary: { bootstrapSats: bigint; carrierSats: bigint; total: string } | null
@@ -42,7 +46,7 @@ export function CreatePage(props: {
   retryPoolOpening: () => void
   refundPoolCreation: () => void
 }) {
-  const { createMode, onSelectMode, busy, connecting, walletReady, walletActionLabel, error, assetForm, onAssetFormChange, assetValidation, assetFormBlocker, createAsset, creationStep, issuedAsset, poolForm, onPoolFormChange, updatePoolPair, assets, poolValidation, creationBaseDetails, creationQuoteDetails, creationBaseAmount, creationQuoteAmount, initialLiquiditySummary, deployment, bootstrapSummary, currentPoolEligibility, controlledCreationAssets, poolFormBlocker, poolAssetIssuance, poolCreation, poolOpeningPending, createPool, retryPoolOpening } = props
+  const { createMode, onSelectMode, busy, connecting, walletReady, walletActionLabel, error, assetForm, onAssetFormChange, assetValidation, assetFormBlocker, createAsset, creationStep, issuedAsset, poolForm, onPoolFormChange, updatePoolPair, assets, poolValidation, creationBaseDetails, creationQuoteDetails, creationBaseAmount, creationQuoteAmount, baseBalance, quoteBalance, balancesReady, onMaxReserve, initialLiquiditySummary, deployment, bootstrapSummary, currentPoolEligibility, controlledCreationAssets, poolFormBlocker, poolAssetIssuance, poolCreation, poolOpeningPending, createPool, retryPoolOpening } = props
   const poolTickers = poolForm.name ? poolAssetTickers(poolForm.name) : null
 
   return <section className="view-page create-page">
@@ -69,8 +73,8 @@ export function CreatePage(props: {
         <div className="form-grid">
           <label><span>Base asset</span><select value={poolForm.baseAssetId} onChange={(e) => updatePoolPair(e.target.value, poolForm.quoteAssetId)}><option value="btc">BTC · native</option>{assets.map((item) => <option key={item.assetId} value={item.assetId}>{item.metadata?.ticker ?? short(item.assetId)}</option>)}</select></label>
           <label><span>Quote asset</span><select value={poolForm.quoteAssetId} onChange={(e) => updatePoolPair(poolForm.baseAssetId, e.target.value)}><option value="">Select asset</option>{assets.filter((item) => item.assetId !== poolForm.baseAssetId).map((item) => <option key={item.assetId} value={item.assetId}>{item.metadata?.ticker ?? short(item.assetId)}</option>)}</select><FieldError message={poolValidation.errors.quoteAssetId} value={poolForm.quoteAssetId} /></label>
-          <label><span>Initial base reserve <small>{creationBaseDetails ? `${creationBaseDetails.ticker} display units · ${creationBaseDetails.decimals} decimals` : 'select an asset'}</small></span><input value={poolForm.baseAmount} onChange={(e) => onPoolFormChange({ ...poolForm, baseAmount: numericText(e.target.value, true) })} placeholder={poolForm.baseAssetId === 'btc' ? '0.002' : '100'} inputMode="decimal" /><FieldError message={poolValidation.errors.baseAmount} value={poolForm.baseAmount} /></label>
-          <label><span>Initial quote reserve <small>{creationQuoteDetails ? `${creationQuoteDetails.ticker} display units · ${creationQuoteDetails.decimals} decimals` : 'select an asset'}</small></span><input value={poolForm.quoteAmount} onChange={(e) => onPoolFormChange({ ...poolForm, quoteAmount: numericText(e.target.value, true) })} placeholder="100" inputMode="decimal" /><FieldError message={poolValidation.errors.quoteAmount} value={poolForm.quoteAmount} /></label>
+          <label><span className="reserve-head"><span>Initial base reserve <small>{creationBaseDetails ? `${creationBaseDetails.ticker} display units · ${creationBaseDetails.decimals} decimals` : 'select an asset'}</small></span><button type="button" className="balance" disabled={busy || !balancesReady || !creationBaseDetails} onClick={() => onMaxReserve('base')}>Balance: {baseBalance} <b>MAX</b></button></span><input value={poolForm.baseAmount} onChange={(e) => onPoolFormChange({ ...poolForm, baseAmount: numericText(e.target.value, true) })} placeholder={poolForm.baseAssetId === 'btc' ? '0.002' : '100'} inputMode="decimal" /><FieldError message={poolValidation.errors.baseAmount} value={poolForm.baseAmount} /></label>
+          <label><span className="reserve-head"><span>Initial quote reserve <small>{creationQuoteDetails ? `${creationQuoteDetails.ticker} display units · ${creationQuoteDetails.decimals} decimals` : 'select an asset'}</small></span><button type="button" className="balance" disabled={busy || !balancesReady || !creationQuoteDetails} onClick={() => onMaxReserve('quote')}>Balance: {quoteBalance} <b>MAX</b></button></span><input value={poolForm.quoteAmount} onChange={(e) => onPoolFormChange({ ...poolForm, quoteAmount: numericText(e.target.value, true) })} placeholder="100" inputMode="decimal" /><FieldError message={poolValidation.errors.quoteAmount} value={poolForm.quoteAmount} /></label>
           <label><span>Total fee · bps</span><input value={poolForm.feeBps} onChange={(e) => onPoolFormChange({ ...poolForm, feeBps: numericText(e.target.value, false) })} inputMode="numeric" /><FieldError message={poolValidation.errors.feeBps} value={poolForm.feeBps} /></label>
           <label><span>Protocol fee · min {MIN_PROTOCOL_FEE_BPS} bps</span><input value={poolForm.protocolFeeBps} onChange={(e) => onPoolFormChange({ ...poolForm, protocolFeeBps: numericText(e.target.value, false) })} inputMode="numeric" /><FieldError message={poolValidation.errors.protocolFeeBps} value={poolForm.protocolFeeBps} /></label>
         </div>
